@@ -112,7 +112,7 @@ LLM_MAX_TOTAL_SECONDS = float(os.environ.get('LLM_MAX_TOTAL_SECONDS', '90'))  # 
 LLM_ALLOW_EXPENSIVE_FALLBACK = os.environ.get('LLM_ALLOW_EXPENSIVE_FALLBACK', 'true').lower() in ('1', 'true', 'yes', 'on')
 LLM_REPAIR_MODEL = os.environ.get('LLM_REPAIR_MODEL', '').strip() or None
 LLM_RESPONSE_FORMAT = os.environ.get('LLM_RESPONSE_FORMAT', 'auto').strip().lower()
-LLM_SYSTEM_PROMPT = os.environ.get('LLM_SYSTEM_PROMPT', 'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object and nothing else.\n\nRequired JSON fields at minimum: query, found, message, matched_sources, available_related_info, source_evidence, excluded_results, highlights, open_questions, answer, confidence, schema_version.\nIf source evidence is missing, set found=false and explain the limitation in message/answer. Do not hallucinate. Do not add explanations outside JSON.')
+LLM_SYSTEM_PROMPT = os.environ.get('LLM_SYSTEM_PROMPT', 'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.')
 LLM_TIMEOUT = float(os.environ.get('LLM_TIMEOUT', '30'))
 LLM_REPAIR_TIMEOUT = float(os.environ.get('LLM_REPAIR_TIMEOUT', '20'))
 LLM_MAX_TOKENS = int(os.environ.get('LLM_MAX_TOKENS', '4096'))
@@ -1459,7 +1459,16 @@ def _normalize_summary_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(parsed or {})
     normalized['found'] = bool(normalized.get('found', bool(str(normalized.get('answer') or '').strip())))
     normalized['answer'] = str(normalized.get('answer') or '').strip()
-    for key in ('highlights', 'open_questions'):
+    
+    # Map follow_up_questions / open_questions robustly
+    fups = normalized.get('follow_up_questions') or normalized.get('open_questions')
+    if not isinstance(fups, list):
+        fups = [] if fups is None else [str(fups)]
+    fups = [str(f).strip() for f in fups if str(f).strip()]
+    normalized['follow_up_questions'] = fups
+    normalized['open_questions'] = fups
+    
+    for key in ('highlights',):
         value = normalized.get(key)
         if not isinstance(value, list):
             value = [] if value is None else [str(value)]
@@ -1576,7 +1585,7 @@ async def _repair_summary_payload(raw: str, spec: Dict[str, str], resolved_llm: 
         {'role': 'system', 'content': 'You repair malformed model output into strict JSON. Do not add facts. Return only JSON.'},
         {'role': 'user', 'content': (
             'Convert this attempted search answer into one strict JSON object with fields '
-            'found, answer, highlights, open_questions, confidence, schema_version. '
+            'found, answer, highlights, follow_up_questions, open_questions, confidence, schema_version. '
             'Use empty strings or arrays when the source text is missing.\n\n'
             f'Attempted output:\n{_truncate_payload(raw or "", 6000)}'
         )},
@@ -1708,13 +1717,16 @@ async def _summarize_query(query: str, items: List[SearchItem], max_sources: int
     user_prompt = (
         f"Query: {query}\n\n"
         f"Sources to use:\n{corpus}\n\n"
-        f"Return ONLY a strict JSON object and nothing else.\n"
-        f"No markdown, no fences, no prose, no prefatory text.\n"
-        f"Write a detailed search-API answer. Target 700 words.\n"
+        f"Return ONLY a strict JSON object matching the following structure:\n\n"
+        f"{{\n"
+        f"  \"found\": true,\n"
+        f"  \"answer\": \"A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.\",\n"
+        f"  \"highlights\": [\"Key fact 1\", \"Key fact 2\"],\n"
+        f"  \"follow_up_questions\": [\"Follow up question 1?\", \"Follow up question 2?\"],\n"
+        f"  \"confidence\": 0.95\n"
+        f"}}\n\n"
         f"Include only facts supported by the provided source text. Avoid sensational wording.\n"
         f"Use the selected evidence from every source; do not answer from only the first source when later sources conflict.\n"
-        f"Return fields: found, answer, highlights, open_questions, confidence, schema_version.\n"
-        f"If fields are missing, use safe defaults: found=false, answer empty, confidence=0.0, arrays empty.\n"
         f"Do not include raw source excerpts unless needed for a short highlight."
     )
 
@@ -1870,7 +1882,9 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     if answer_requested:
         search_req.include_content = True
         if search_req.fetch_top_n is None:
-            search_req.fetch_top_n = min(max_results, req.summarize_top_n or 5)
+            search_req.fetch_top_n = max_results
+        if search_req.summarize_top_n is None:
+            search_req.summarize_top_n = max_results
             
     results = await _run_search(search_req)
     
@@ -1880,7 +1894,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         summary_payload = await _summarize_query(
             query=req.query,
             items=results,
-            max_sources=req.summarize_top_n or 5,
+            max_sources=search_req.summarize_top_n,
             max_chars_per_source=_resolve_max_chars_per_source(req),
             llm_options=req.llm_options,
             debug=_resolve_debug(req),
