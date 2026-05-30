@@ -16,7 +16,10 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-import trafilatura
+try:
+    import trafilatura
+except Exception:
+    trafilatura = None
 
 try:
     from playwright.async_api import async_playwright
@@ -89,18 +92,23 @@ ENRICH_MIN_CONTENT_CHARS = int(os.environ.get('ENRICH_MIN_CONTENT_CHARS', '240')
 ENRICH_DEFAULT_MAX_CHARS = int(os.environ.get('ENRICH_DEFAULT_MAX_CHARS', '160000'))
 
 SUMMARIZER_ENABLED = os.environ.get('SUMMARIZER_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on')
-LLM_MODEL = os.environ.get('LLM_MODEL', 'gpt-4o-mini')
-LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openai').strip().lower()
+# Primary model: DeepSeek V4 Flash (free, 1M ctx, fast)
+LLM_MODEL = os.environ.get('LLM_MODEL', 'openrouter/deepseek/deepseek-v4-flash:free')
+LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'openrouter').strip().lower()
 LLM_QUALITY_TIER = os.environ.get('LLM_QUALITY_TIER', 'balanced').strip().lower()
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '').strip() or None
 OPENROUTER_API_BASE = os.environ.get('OPENROUTER_API_BASE', 'https://openrouter.ai/api/v1').strip()
-OPENROUTER_MODEL_CHEAP = os.environ.get('OPENROUTER_MODEL_CHEAP', 'openrouter/openai/gpt-oss-120b:free').strip()
-OPENROUTER_MODEL_BALANCED = os.environ.get('OPENROUTER_MODEL_BALANCED', 'openrouter/openai/gpt-oss-120b:free').strip()
-OPENROUTER_MODEL_BEST = os.environ.get('OPENROUTER_MODEL_BEST', 'openrouter/anthropic/claude-3.5-sonnet').strip()
-LLM_FALLBACK_MODELS = [m.strip() for m in os.environ.get('LLM_FALLBACK_MODELS', 'openrouter/nvidia/nemotron-3-super-120b-a12b:free').split(',') if m.strip()]
-LLM_MAX_ATTEMPTS = int(os.environ.get('LLM_MAX_ATTEMPTS', '3'))
+OPENROUTER_MODEL_CHEAP = os.environ.get('OPENROUTER_MODEL_CHEAP', 'openrouter/deepseek/deepseek-v4-flash:free').strip()
+OPENROUTER_MODEL_BALANCED = os.environ.get('OPENROUTER_MODEL_BALANCED', 'openrouter/deepseek/deepseek-v4-flash:free').strip()
+OPENROUTER_MODEL_BEST = os.environ.get('OPENROUTER_MODEL_BEST', 'openrouter/openai/gpt-5-mini').strip()
+# Fallback cascade: Kimi K2.6 (free) -> Qwen3 Coder (free) -> GPT-5 Mini (paid backstop)
+LLM_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    'LLM_FALLBACK_MODELS',
+    'openrouter/moonshotai/kimi-k2.6:free,openrouter/qwen/qwen3-coder:free,openrouter/openai/gpt-5-mini'
+).split(',') if m.strip()]
+LLM_MAX_ATTEMPTS = int(os.environ.get('LLM_MAX_ATTEMPTS', '4'))  # 3 free + 1 paid backstop
 LLM_MAX_REPAIR_ATTEMPTS = int(os.environ.get('LLM_MAX_REPAIR_ATTEMPTS', '1'))
-LLM_MAX_TOTAL_SECONDS = float(os.environ.get('LLM_MAX_TOTAL_SECONDS', '45'))
+LLM_MAX_TOTAL_SECONDS = float(os.environ.get('LLM_MAX_TOTAL_SECONDS', '90'))  # free models can be slow
 LLM_ALLOW_EXPENSIVE_FALLBACK = os.environ.get('LLM_ALLOW_EXPENSIVE_FALLBACK', 'true').lower() in ('1', 'true', 'yes', 'on')
 LLM_REPAIR_MODEL = os.environ.get('LLM_REPAIR_MODEL', '').strip() or None
 LLM_RESPONSE_FORMAT = os.environ.get('LLM_RESPONSE_FORMAT', 'auto').strip().lower()
@@ -1090,7 +1098,7 @@ async def _extract_content(url: str, timeout_s: float) -> Dict[str, Any]:
         text = _pdf_to_text(body)
         method = 'pdf_pypdf' if text else 'pdf_unavailable_or_empty'
 
-    if not text and html:
+    if not text and html and trafilatura is not None:
         text = trafilatura.extract(html)
         method = 'trafilatura' if text else 'trafilatura_empty'
 
@@ -1339,17 +1347,6 @@ def _select_source_passages(item: SearchItem, query: str, max_chars: int) -> Dic
     return {'usable': usable, 'mode': mode, 'flags': sorted(set(flags)), 'passages': selected}
 
 
-def _current_event_instruction(query: str) -> str:
-    terms = set(_word_list(query or ''))
-    if not terms.intersection(_CURRENT_EVENT_TERMS):
-        return ''
-    return (
-        "Current-event handling: this query appears to ask about a new/current/recent status. "
-        "Prefer newer dated reports for current status, but mention older official/profile pages when they conflict. "
-        "If sources disagree, explain the disagreement. If no replacement or successor is confirmed, say that clearly.\n"
-    )
-
-
 def _normalize_for_summarizer(items: List[SearchItem], max_chars_per_source: int, query: str = '') -> str:
     chunks: List[str] = []
     for i, item in enumerate(items, start=1):
@@ -1399,7 +1396,7 @@ def _litellm_api_key_for_model(model: str, provider: Optional[str] = None) -> Op
     if 'bedrock' in normalized:
         return os.environ.get('AWS_ACCESS_KEY_ID')
     if 'llama' in normalized and normalized.startswith('ollama/'):
-        return os.environ.get('OLLAMA_API_KEY') or 'dummy'
+        return os.environ.get('OLLAMA_API_KEY')
     return None
 
 
@@ -1711,7 +1708,6 @@ async def _summarize_query(query: str, items: List[SearchItem], max_sources: int
     user_prompt = (
         f"Query: {query}\n\n"
         f"Sources to use:\n{corpus}\n\n"
-        f"{_current_event_instruction(query)}"
         f"Return ONLY a strict JSON object and nothing else.\n"
         f"No markdown, no fences, no prose, no prefatory text.\n"
         f"Write a detailed search-API answer. Target 700 words.\n"
