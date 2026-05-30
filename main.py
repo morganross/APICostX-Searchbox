@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import ipaddress
 import json
 import os
@@ -902,6 +902,17 @@ async def _search_brave(req: SearchRequest, count: int) -> Dict[str, Any]:
 async def _search_serper(req: SearchRequest, count: int) -> Dict[str, Any]:
     if not SERPER_API_KEY:
         raise HTTPException(status_code=500, detail='SERPER_API_KEY is not configured')
+
+    if SERPER_API_KEY.lower() == 'mock':
+        return {
+            'organic': [
+                {
+                    'title': 'Mock Result 1',
+                    'link': 'https://example.com/mock1',
+                    'snippet': 'This is a mock search result snippet for testing the native searchbox pipeline.',
+                }
+            ]
+        }
 
     endpoint = SERPER_API_URL
     if (getattr(req, 'topic', None) or '').strip().lower() == 'news':
