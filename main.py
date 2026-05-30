@@ -174,6 +174,7 @@ class SourceEvidence(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=512)
+    api_key: Optional[str] = Field(default=None, max_length=256)
     count: int = Field(default=SERPER_DEFAULT_COUNT, ge=1, le=SERPER_MAX_COUNT)
     max_results: Optional[int] = Field(default=None, ge=0, le=SERPER_MAX_COUNT)
     include_content: bool = Field(default=False)
@@ -386,17 +387,23 @@ def status() -> Dict[str, Any]:
     return dict(_STATUS)
 
 
-def _auth_key_from_header(authorization: Optional[str]) -> str:
+def _auth_key_from_header_or_key(authorization: Optional[str], api_key: Optional[str] = None) -> str:
     if AUTH_DISABLED:
         return 'anonymous'
+    token = None
+    if authorization and authorization.startswith('Bearer '):
+        token = authorization[len('Bearer '):].strip()
+    elif api_key:
+        token = api_key.strip()
+
+    if not token:
+        raise HTTPException(status_code=401, detail='Missing API key or bearer token')
+
     if not SEARCH_API_KEY:
         raise HTTPException(status_code=503, detail='SEARCH_API_KEY is not configured')
-    prefix = 'Bearer '
-    if not authorization or not authorization.startswith(prefix):
-        raise HTTPException(status_code=401, detail='Missing bearer token')
-    token = authorization[len(prefix):].strip()
+
     if token != SEARCH_API_KEY:
-        raise HTTPException(status_code=403, detail='Invalid bearer token')
+        raise HTTPException(status_code=403, detail='Invalid API key')
     return 'authorized'
 
 
@@ -412,8 +419,8 @@ def _check_rate_limit(bucket_key: str) -> None:
     bucket.append(now)
 
 
-def _authorize(authorization: Optional[str]) -> None:
-    _check_rate_limit(_auth_key_from_header(authorization))
+def _authorize(authorization: Optional[str], api_key: Optional[str] = None) -> None:
+    _check_rate_limit(_auth_key_from_header_or_key(authorization, api_key))
 
 
 def _shorten(text: str, max_chars: int) -> str:
@@ -902,17 +909,6 @@ async def _search_brave(req: SearchRequest, count: int) -> Dict[str, Any]:
 async def _search_serper(req: SearchRequest, count: int) -> Dict[str, Any]:
     if not SERPER_API_KEY:
         raise HTTPException(status_code=500, detail='SERPER_API_KEY is not configured')
-
-    if SERPER_API_KEY.lower() == 'mock':
-        return {
-            'organic': [
-                {
-                    'title': 'Mock Result 1',
-                    'link': 'https://example.com/mock1',
-                    'snippet': 'This is a mock search result snippet for testing the native searchbox pipeline.',
-                }
-            ]
-        }
 
     endpoint = SERPER_API_URL
     if (getattr(req, 'topic', None) or '').strip().lower() == 'news':
@@ -1812,45 +1808,6 @@ async def _summarize_query(query: str, items: List[SearchItem], max_sources: int
 
     return parsed
 
-class GPTRRetrieverRequest(BaseModel):
-    query: Optional[str] = Field(default=None, min_length=1, max_length=512)
-    q: Optional[str] = Field(default=None, min_length=1, max_length=512)
-    question: Optional[str] = Field(default=None, min_length=1, max_length=512)
-    max_results: Optional[int] = Field(default=None, ge=1, le=SERPER_MAX_COUNT)
-    count: Optional[int] = Field(default=None, ge=1, le=SERPER_MAX_COUNT)
-    include_domains: List[str] = Field(default_factory=list)
-    exclude_domains: List[str] = Field(default_factory=list)
-    time_range: Optional[str] = Field(default=None, max_length=16)
-    days: Optional[int] = Field(default=None, ge=1, le=3650)
-    country: Optional[str] = Field(default=None, max_length=64)
-    safe_search: bool = Field(default=False)
-    timeout: Optional[float] = Field(default=None, ge=1, le=120)
-    debug: bool = Field(default=False)
-
-def _resolve_gptr_query(req: GPTRRetrieverRequest) -> str:
-    query = (req.query or req.q or req.question or '').strip()
-    if not query:
-        raise HTTPException(status_code=422, detail='GPTR retriever requires query, q, or question')
-    return query
-
-
-def _gptr_raw_content(item: SearchItem) -> str:
-    body = (item.extracted_content or item.raw_content or item.content or '').strip()
-    if item.selected_passages:
-        body = '\n\n'.join(item.selected_passages).strip()
-    if not body or _is_domain_only_text(body, item.url):
-        parts = []
-        if item.title:
-            parts.append(f"Title: {item.title}")
-        if item.description:
-            parts.append(f"Search snippet: {item.description}")
-        if item.published:
-            parts.append(f"Published: {item.published}")
-        body = '\n'.join(parts).strip()
-    return body
-
-
-
 def _calculate_searchbox_usage(
     provider: str,
     search_queries: int = 0,
@@ -1884,99 +1841,57 @@ def _calculate_searchbox_usage(
     }
 
 
-@app.post('/gptr-retriever')
-async def gptr_retriever(req: GPTRRetrieverRequest, authorization: Optional[str] = Header(default=None)):
-    _authorize(authorization)
-    query = _resolve_gptr_query(req)
-    max_results = req.max_results or req.count or SERPER_DEFAULT_COUNT
-    search_req = SearchRequest(
-        query=query,
-        count=max_results,
-        max_results=max_results,
-        include_content=True,
-        include_raw_content=False,
-        include_answer=False,
-        fetch_top_n=max_results,
-        summarize_top_n=max_results,
-        include_domains=req.include_domains,
-        exclude_domains=req.exclude_domains,
-        time_range=req.time_range,
-        days=req.days,
-        country=req.country,
-        safe_search=req.safe_search,
-        timeout=req.timeout,
-        debug=req.debug,
-    )
-    results = await _run_search(search_req)
-    _normalize_for_summarizer(results[:max_results], max_chars_per_source=_resolve_max_chars_per_source(search_req), query=query)
-    
-    # Calculate scrapes cost metrics
-    scrapes_http = len([r for r in results[:max_results] if r.scraped and r.extract_method != "playwright_fallback"])
-    scrapes_pw = len([r for r in results[:max_results] if r.scraped and r.extract_method == "playwright_fallback"])
-    
-    usage_block = _calculate_searchbox_usage(
-        provider=SEARCH_PROVIDER,
-        search_queries=1 if results else 0,
-        scrapes_http=scrapes_http,
-        scrapes_playwright=scrapes_pw
-    )
-    
-    payload = []
-    for idx, item in enumerate(results[:max_results]):
-        raw_content = _gptr_raw_content(item)
-        if not item.url or not raw_content:
-            continue
-        row = {'url': item.url, 'raw_content': raw_content}
-        if idx == 0:
-            row['_searchbox_usage'] = usage_block
-        if req.debug:
-            row.update({
-                'title': item.title,
-                'published': item.published,
-                'summary_input_mode': item.summary_input_mode,
-                'quality_flags': item.quality_flags or [],
-                'scraped': item.scraped,
-                'http_status': item.http_status,
-                'extract_method': item.extract_method,
-            })
-        payload.append(row)
-    return payload
+class TavilySearchResult(BaseModel):
+    title: str
+    url: str
+    content: str
+    raw_content: Optional[str] = None
+    score: float
 
 
-@app.get('/gptr-retriever')
-async def gptr_retriever_get(query: Optional[str] = None, q: Optional[str] = None, question: Optional[str] = None, max_results: Optional[int] = None, count: Optional[int] = None, authorization: Optional[str] = Header(default=None)):
-    req = GPTRRetrieverRequest(query=query, q=q, question=question, max_results=max_results, count=count)
-    return await gptr_retriever(req, authorization=authorization)
+class TavilySearchResponse(BaseModel):
+    query: str
+    follow_up_questions: Optional[List[str]] = None
+    answer: Optional[str] = None
+    images: Optional[List[Dict[str, Any]]] = None
+    results: List[TavilySearchResult]
+    _searchbox_usage: Optional[Dict[str, Any]] = None
 
-@app.post('/search', response_model=SearchResponse)
+
+@app.post('/search')
 async def search(req: SearchRequest, authorization: Optional[str] = Header(default=None)):
-    _authorize(authorization)
+    _authorize(authorization, req.api_key)
     _STATUS['requests_total'] += 1
     t0 = datetime.now()
     request_id = str(uuid.uuid4())
-    answer_requested = _resolve_include_answer(req, default=False)
+    
+    max_results = req.max_results or req.count or 5
     search_req = SearchRequest(**_model_dict(req))
+    search_req.count = max_results
+    search_req.max_results = max_results
+    
+    answer_requested = _boolish(req.include_answer, default=False)
     if answer_requested:
         search_req.include_content = True
         if search_req.fetch_top_n is None:
-            search_req.fetch_top_n = min(_resolve_max_results(req) or SERPER_DEFAULT_COUNT, _resolve_summarize_top_n(req))
+            search_req.fetch_top_n = min(max_results, req.summarize_top_n or 5)
+            
     results = await _run_search(search_req)
+    
     summary_payload = None
     answer = None
-    usage = None
     if answer_requested:
         summary_payload = await _summarize_query(
             query=req.query,
             items=results,
-            max_sources=_resolve_summarize_top_n(req),
+            max_sources=req.summarize_top_n or 5,
             max_chars_per_source=_resolve_max_chars_per_source(req),
             llm_options=req.llm_options,
             debug=_resolve_debug(req),
             include_usage=req.include_usage,
         )
         answer = summary_payload.get('answer') if isinstance(summary_payload, dict) else None
-        
-    # Calculate scrapes cost metrics
+
     scrapes_http = len([r for r in results if r.scraped and r.extract_method != "playwright_fallback"])
     scrapes_pw = len([r for r in results if r.scraped and r.extract_method == "playwright_fallback"])
     llm_usage = summary_payload.get('model_usage') if summary_payload else None
@@ -1988,34 +1903,87 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         scrapes_playwright=scrapes_pw,
         llm_usage=llm_usage
     )
-    buckets = _split_result_buckets(results, _resolve_summarize_top_n(req)) if answer_requested else {'not_summarized': [], 'excluded_results': []}
-    global_images: List[ImageItem] = []
+    
+    tavily_results = []
+    for r in results[:max_results]:
+        content = r.content or r.description or ""
+        raw_content = None
+        if req.include_raw_content:
+            raw_content = r.extracted_content or r.raw_content or content
+            
+        tavily_results.append(TavilySearchResult(
+            title=r.title or "",
+            url=r.url or "",
+            content=content,
+            raw_content=raw_content,
+            score=r.score or 0.0
+        ))
+        
+    global_images: List[Dict[str, Any]] = []
     if req.include_images:
         for item in results:
             for img in item.images or []:
-                if img.url and all(existing.url != img.url for existing in global_images):
-                    global_images.append(img)
-    return SearchResponse(
-        provider=SEARCH_PROVIDER,
+                if img.url and all(existing['url'] != img.url for existing in global_images):
+                    global_images.append({"url": img.url, "description": img.description or ""})
+                    
+    response_data = TavilySearchResponse(
         query=req.query,
-        results_count=len(results),
-        request_id=request_id,
-        results=results,
-        images=global_images if req.include_images else None,
+        follow_up_questions=summary_payload.get('follow_up_questions') if summary_payload else None,
         answer=answer,
-        summary=summary_payload,
-        usage=usage,
-        unused_results=[*buckets['not_summarized'], *buckets['excluded_results']] if _resolve_debug(req) and answer_requested else None,
-        not_summarized=buckets['not_summarized'] if _resolve_debug(req) and answer_requested else None,
-        excluded_results=buckets['excluded_results'] if _resolve_debug(req) and answer_requested else None,
-        response_time=round((datetime.now() - t0).total_seconds(), 3),
-        auto_parameters={'search_depth': req.search_depth or 'basic'} if req.auto_parameters else None,
+        images=global_images if req.include_images else None,
+        results=tavily_results,
+        _searchbox_usage=usage
     )
+    
+    headers = {
+        "X-Searchbox-Usage-Total-Cost": str(usage.get("total_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Search-Cost": str(usage.get("search_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Scrape-Cost": str(usage.get("scrape_cost_usd", 0.0)),
+        "X-Searchbox-Usage-LLM-Cost": str(usage.get("llm_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Search-Requests": str(usage.get("search_requests", 0)),
+        "X-Searchbox-Usage-Scrape-Fetches": str(usage.get("scrape_fetches", 0)),
+    }
+    
+    dumped = response_data.model_dump() if hasattr(response_data, 'model_dump') else response_data.dict()
+    # Filter out follow_up_questions/images/answer if None to match Tavily behavior
+    if dumped.get('follow_up_questions') is None:
+        dumped.pop('follow_up_questions', None)
+    if dumped.get('answer') is None:
+        dumped.pop('answer', None)
+    if dumped.get('images') is None:
+        dumped.pop('images', None)
+        
+    return JSONResponse(content=dumped, headers=headers)
 
 
 @app.get('/search')
-async def search_get(q: str, count: int = SERPER_DEFAULT_COUNT, include_content: bool = False, fetch_top_n: Optional[int] = None, authorization: Optional[str] = Header(default=None)):
-    req = SearchRequest(query=q, count=count, include_content=include_content, fetch_top_n=fetch_top_n)
+async def search_get(
+    q: str,
+    max_results: int = 5,
+    search_depth: str = 'basic',
+    topic: str = 'general',
+    include_answer: bool = False,
+    include_images: bool = False,
+    include_raw_content: bool = False,
+    include_domains: Optional[str] = None,
+    exclude_domains: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None)
+):
+    inc_domains = [d.strip() for d in include_domains.split(',') if d.strip()] if include_domains else []
+    exc_domains = [d.strip() for d in exclude_domains.split(',') if d.strip()] if exclude_domains else []
+    
+    req = SearchRequest(
+        query=q,
+        max_results=max_results,
+        count=max_results,
+        search_depth=search_depth,
+        topic=topic,
+        include_answer=include_answer,
+        include_images=include_images,
+        include_raw_content=include_raw_content,
+        include_domains=inc_domains,
+        exclude_domains=exc_domains,
+    )
     return await search(req, authorization=authorization)
 
 
