@@ -212,6 +212,15 @@ class SearchRequest(BaseModel):
     response_mode: Optional[str] = Field(default=None, max_length=32)
     timeout: Optional[float] = Field(default=None, ge=1, le=120)
     llm_options: Optional[LLMOptions] = Field(default=None)
+    caller: Optional[str] = Field(default=None, max_length=64)
+    user_uuid: Optional[str] = Field(default=None, max_length=64)
+    run_id: Optional[str] = Field(default=None, max_length=64)
+    task_id: Optional[str] = Field(default=None, max_length=64)
+    aiq_job_id: Optional[str] = Field(default=None, max_length=64)
+    report_index: Optional[int] = Field(default=None)
+    report_count: Optional[int] = Field(default=None)
+    advanced_search: Optional[bool] = Field(default=None)
+    max_content_length: Optional[int] = Field(default=None)
 
 
 class SearchItem(BaseModel):
@@ -294,6 +303,15 @@ class SearchSummaryRequest(BaseModel):
     response_mode: Optional[str] = Field(default=None, max_length=32)
     timeout: Optional[float] = Field(default=None, ge=1, le=120)
     llm_options: Optional[LLMOptions] = Field(default=None)
+    caller: Optional[str] = Field(default=None, max_length=64)
+    user_uuid: Optional[str] = Field(default=None, max_length=64)
+    run_id: Optional[str] = Field(default=None, max_length=64)
+    task_id: Optional[str] = Field(default=None, max_length=64)
+    aiq_job_id: Optional[str] = Field(default=None, max_length=64)
+    report_index: Optional[int] = Field(default=None)
+    report_count: Optional[int] = Field(default=None)
+    advanced_search: Optional[bool] = Field(default=None)
+    max_content_length: Optional[int] = Field(default=None)
 
 
 class SearchSummaryResponse(BaseModel):
@@ -516,11 +534,69 @@ def _split_result_buckets(items: List[SearchItem], max_sources: int) -> Dict[str
     return {'not_summarized': not_summarized, 'excluded_results': excluded}
 
 
-def _normalize_search_query(req: Any) -> str:
+async def _normalize_search_query(req: Any) -> str:
     query = (getattr(req, 'query', '') or '').strip()
     if getattr(req, 'exact_match', False) and query and not (query.startswith('"') and query.endswith('"')):
-        return f'"{query}"'
-    return query
+        query = f'"{query}"'
+
+    import re
+    operators = re.findall(r'(?:OR\s+)?(?:site|date|filetype|ext):[^\s]+', query)
+    
+    base_query = query
+    for op in operators:
+        base_query = base_query.replace(op, '')
+        
+    base_query = re.sub(r'\s+', ' ', base_query).strip()
+    
+    words = base_query.split()
+    if len(words) <= 15:
+        return query
+        
+    if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE:
+        try:
+            resolved_llm = _resolve_llm_options(getattr(req, 'llm_options', None))
+            system_prompt = "You are an expert Google Search query optimizer. Convert the user's verbose paragraph into an extremely dense 5-10 keyword Google Search query. Do not generalize or simplify; be extra specific, and focus heavily on the last part of the search query. Return ONLY a single JSON object with the structure: {\"query\": \"optimized keywords\"}. Do not use markdown or extra text."
+            messages = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': base_query}
+            ]
+            for spec in _build_llm_candidate_specs(resolved_llm):
+                try:
+                    attempt_timeout = min(float(resolved_llm.get('timeout', 3.0)), 3.0)
+                    llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=attempt_timeout)
+                    payload = _extract_llm_response_payload(llm_resp)
+                    parsed = _extract_json_from_text(payload.get('raw') or '')
+                    if parsed and isinstance(parsed, dict) and parsed.get('query'):
+                        opt_query = str(parsed['query']).strip()
+                        final_query = opt_query
+                        if operators:
+                            final_query += ' ' + ' '.join(operators)
+                        return final_query.strip()
+                except Exception as inner_e:
+                    import traceback
+                    print("LLM QUERY MAKER INNER FAILED:", repr(inner_e))
+                    traceback.print_exc()
+                    continue
+        except Exception as e:
+            import traceback
+            print("LLM QUERY MAKER FAILED:", repr(e))
+            traceback.print_exc()
+            pass
+
+    base_query = ' '.join(words[:20])
+    base_query = re.sub(r'\s+OR$', '', base_query)
+    if base_query.count('"') % 2 != 0:
+        base_query += '"'
+    open_p = base_query.count('(')
+    close_p = base_query.count(')')
+    if open_p > close_p:
+        base_query += ')' * (open_p - close_p)
+        
+    final_query = base_query
+    if operators:
+        final_query += ' ' + ' '.join(operators)
+        
+    return final_query.strip()
 
 
 def _resolve_country(req: Any) -> Optional[str]:
@@ -888,7 +964,7 @@ async def _search_brave(req: SearchRequest, count: int) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         'count': count,
-        'q': _normalize_search_query(req),
+        'q': await _normalize_search_query(req),
         'search_lang': 'en',
         'safesearch': _resolve_brave_safesearch(req),
         'operators': True,
@@ -922,7 +998,7 @@ async def _search_serper(req: SearchRequest, count: int) -> Dict[str, Any]:
     if (getattr(req, 'topic', None) or '').strip().lower() == 'news':
         endpoint = SERPER_API_URL.rsplit('/', 1)[0] + '/news'
     payload: Dict[str, Any] = {
-        'q': _normalize_search_query(req),
+        'q': await _normalize_search_query(req),
         'num': count,
         'hl': 'en',
     }
@@ -951,7 +1027,7 @@ async def _search_serper(req: SearchRequest, count: int) -> Dict[str, Any]:
 
 async def _search_searxng(req: SearchRequest, count: int) -> Dict[str, Any]:
     params: Dict[str, Any] = {
-        'q': _normalize_search_query(req),
+        'q': await _normalize_search_query(req),
         'format': 'json',
         'language': 'en',
         'safesearch': _resolve_searxng_safesearch(req),
@@ -1863,6 +1939,7 @@ class TavilySearchResponse(BaseModel):
     answer: Optional[str] = None
     images: Optional[List[Dict[str, Any]]] = None
     results: List[TavilySearchResult]
+    usage: Optional[Dict[str, Any]] = None
     _searchbox_usage: Optional[Dict[str, Any]] = None
 
 
@@ -1942,6 +2019,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         answer=answer,
         images=global_images if req.include_images else None,
         results=tavily_results,
+        usage=usage if (req.include_usage or getattr(req, "caller", None) == "aiq") else None,
         _searchbox_usage=usage
     )
     
@@ -1962,6 +2040,8 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         dumped.pop('answer', None)
     if dumped.get('images') is None:
         dumped.pop('images', None)
+    if dumped.get('usage') is None:
+        dumped.pop('usage', None)
         
     return JSONResponse(content=dumped, headers=headers)
 
