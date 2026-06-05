@@ -23,6 +23,18 @@ from searchbox.extraction import (
     html_to_text,
     pdf_to_text,
 )
+from searchbox.providers.web import (
+    WebSearchOptions,
+    WebSearchSettings,
+    parse_brave_results,
+    parse_searxng_results,
+    parse_serper_results,
+    search_brave as web_search_brave,
+    search_provider as web_search_provider,
+    search_searxng as web_search_searxng,
+    search_serper as web_search_serper,
+    searxng_query_url as web_searxng_query_url,
+)
 from searchbox.text import (
     boolish as _boolish,
     bounded_int as _bounded_int,
@@ -820,183 +832,68 @@ def _pdf_to_text(data: bytes) -> str:
     return pdf_to_text(data)
 
 
+def _web_search_settings() -> WebSearchSettings:
+    return WebSearchSettings(
+        search_provider=SEARCH_PROVIDER,
+        user_agent=USER_AGENT,
+        request_timeout=REQUEST_TIMEOUT,
+        brave_api_url=BRAVE_API_URL,
+        brave_api_key=BRAVE_API_KEY,
+        serper_api_url=SERPER_API_URL,
+        serper_api_key=SERPER_API_KEY,
+        searxng_url=SEARXNG_URL,
+    )
+
+
+async def _web_search_options(req: SearchRequest, count: int) -> WebSearchOptions:
+    return WebSearchOptions(
+        query=await _normalize_search_query(req),
+        count=count,
+        topic=(getattr(req, 'topic', None) or '').strip() or None,
+        country=_resolve_country(req),
+        brave_safesearch=_resolve_brave_safesearch(req),
+        searxng_safesearch=_resolve_searxng_safesearch(req),
+        freshness=_resolve_freshness(req),
+        searxng_time_range=_resolve_searxng_time_range(req),
+        serper_tbs=_resolve_serper_tbs(req),
+        search_depth=_resolve_search_depth(req),
+        safe_search=bool(getattr(req, 'safe_search', False)),
+    )
+
+
 def _searxng_query_url() -> str:
-    return SEARXNG_URL.rstrip('/') + '/search'
+    return web_searxng_query_url(SEARXNG_URL)
 
 
 def _parse_brave_results(data: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
-    raw_results = data.get('web', {}).get('results', []) if isinstance(data, dict) else []
-    parsed: List[Dict[str, Any]] = []
-    for idx, item in enumerate(raw_results or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        if len(parsed) >= limit:
-            break
-        parsed.append({
-            'rank': idx,
-            'title': (item.get('title') or '').strip(),
-            'url': (item.get('url') or '').strip(),
-            'description': (item.get('description') or '').strip()[:3000],
-            'published': item.get('published') or None,
-            'language': item.get('language') or None,
-            'score': item.get('score') if isinstance(item.get('score'), (int, float)) else None,
-            'source': 'brave',
-            'engine': 'brave',
-        })
-    return parsed
+    return parse_brave_results(data, limit)
 
 
 def _parse_serper_results(data: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
-    raw_results = data.get('organic', []) if isinstance(data, dict) else []
-    parsed: List[Dict[str, Any]] = []
-    for idx, item in enumerate(raw_results or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        if len(parsed) >= limit:
-            break
-        parsed.append({
-            'rank': int(item.get('position') or idx),
-            'title': (item.get('title') or '').strip(),
-            'url': (item.get('link') or '').strip(),
-            'description': (item.get('snippet') or '').strip()[:3000],
-            'published': item.get('date') or None,
-            'language': None,
-            'score': None,
-            'source': 'serper',
-            'engine': 'google',
-            'images': [
-                {'url': img.get('imageUrl') or img.get('thumbnailUrl') or img.get('link') or '', 'description': img.get('title') or img.get('source')}
-                for img in (item.get('images') or [])
-                if isinstance(img, dict) and (img.get('imageUrl') or img.get('thumbnailUrl') or img.get('link'))
-            ],
-        })
-    return parsed
+    return parse_serper_results(data, limit)
 
 
 def _parse_searxng_results(data: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
-    raw_results = data.get('results', []) if isinstance(data, dict) else []
-    parsed: List[Dict[str, Any]] = []
-    for idx, item in enumerate(raw_results or [], start=1):
-        if not isinstance(item, dict):
-            continue
-        if len(parsed) >= limit:
-            break
-        parsed.append({
-            'rank': idx,
-            'title': (item.get('title') or '').strip(),
-            'url': (item.get('url') or '').strip(),
-            'description': (item.get('content') or '').strip()[:3000],
-            'published': item.get('publishedDate') or item.get('published') or None,
-            'language': item.get('language') or None,
-            'score': item.get('score') if isinstance(item.get('score'), (int, float)) else None,
-            'source': 'searxng',
-            'engine': item.get('engine') if isinstance(item.get('engine'), str) else None,
-        })
-    return parsed
+    return parse_searxng_results(data, limit)
 
 
 async def _search_brave(req: SearchRequest, count: int) -> Dict[str, Any]:
-    if not BRAVE_API_KEY:
-        raise HTTPException(status_code=500, detail='BRAVE_API_KEY is not configured')
-
-    payload: Dict[str, Any] = {
-        'count': count,
-        'q': await _normalize_search_query(req),
-        'search_lang': 'en',
-        'safesearch': _resolve_brave_safesearch(req),
-        'operators': True,
-    }
-    country = _resolve_country(req)
-    if country:
-        payload['country'] = country
-    freshness = _resolve_freshness(req)
-    if freshness:
-        payload['freshness'] = freshness
-    if _resolve_search_depth(req) == 'advanced':
-        payload['extra_snippets'] = True
-    headers = {
-        'Accept': 'application/json',
-        'Accept-Encoding': 'gzip',
-        'X-Subscription-Token': BRAVE_API_KEY,
-        'User-Agent': USER_AGENT,
-    }
-
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.get(BRAVE_API_URL, params=payload, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+    return await web_search_brave(await _web_search_options(req, count), _web_search_settings())
 
 
 async def _search_serper(req: SearchRequest, count: int) -> Dict[str, Any]:
-    if not SERPER_API_KEY:
-        raise HTTPException(status_code=500, detail='SERPER_API_KEY is not configured')
-
-    endpoint = SERPER_API_URL
-    if (getattr(req, 'topic', None) or '').strip().lower() == 'news':
-        endpoint = SERPER_API_URL.rsplit('/', 1)[0] + '/news'
-    payload: Dict[str, Any] = {
-        'q': await _normalize_search_query(req),
-        'num': count,
-        'hl': 'en',
-    }
-    country = _resolve_country(req)
-    if country:
-        payload['gl'] = country.lower()
-    tbs = _resolve_serper_tbs(req)
-    if tbs:
-        payload['tbs'] = tbs
-    if getattr(req, 'safe_search', False):
-        payload['safe'] = 'active'
-
-    headers = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'X-API-KEY': SERPER_API_KEY,
-        'User-Agent': USER_AGENT,
-    }
-
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.post(endpoint, json=payload, headers=headers)
-        resp.raise_for_status()
-        _STATUS['provider_success_total'] += 1
-        return resp.json()
+    return await web_search_serper(await _web_search_options(req, count), _web_search_settings())
 
 
 async def _search_searxng(req: SearchRequest, count: int) -> Dict[str, Any]:
-    params: Dict[str, Any] = {
-        'q': await _normalize_search_query(req),
-        'format': 'json',
-        'language': 'en',
-        'safesearch': _resolve_searxng_safesearch(req),
-        'categories': 'general',
-    }
-    time_range = _resolve_searxng_time_range(req)
-    if time_range:
-        params['time_range'] = time_range
-    headers = {'User-Agent': USER_AGENT}
-    async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.get(_searxng_query_url(), params=params, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    parsed = _parse_searxng_results(data, count)
-    return {'web': {'results': parsed}}
+    return await web_search_searxng(await _web_search_options(req, count), _web_search_settings())
 
 
 async def _search_provider(req: SearchRequest, count: int) -> List[Dict[str, Any]]:
     try:
-        if SEARCH_PROVIDER == 'serper':
-            data = await _search_serper(req, count)
-            return _parse_serper_results(data, count)
-        if SEARCH_PROVIDER == 'brave':
-            data = await _search_brave(req, count)
-            _STATUS['provider_success_total'] += 1
-            return _parse_brave_results(data, count)
-        if SEARCH_PROVIDER == 'searxng':
-            data = await _search_searxng(req, count)
-            _STATUS['provider_success_total'] += 1
-            return data.get('web', {}).get('results', [])
-        raise HTTPException(status_code=400, detail=f'Unknown SEARCH_PROVIDER {SEARCH_PROVIDER!r}')
+        results = await web_search_provider(await _web_search_options(req, count), _web_search_settings())
+        _STATUS['provider_success_total'] += 1
+        return results
     except HTTPException:
         _STATUS['provider_error_total'] += 1
         raise

@@ -106,3 +106,11 @@ def test_extraction_helpers_are_available():
     assert html_to_text(html) == "Hello world"
     assert pdf_to_text(b"not a pdf") == ""
     assert ExtractionSettings(user_agent="test-agent").user_agent == "test-agent"
+
+def test_web_provider_parsers_are_available():
+    from searchbox.providers.web import WebSearchOptions, parse_serper_results
+
+    rows = parse_serper_results({"organic": [{"title": "Result", "link": "https://example.com", "snippet": "Text"}]}, 5)
+    assert rows[0]["source"] == "serper"
+    assert rows[0]["url"] == "https://example.com"
+    assert WebSearchOptions(query="query", count=1).query == "query"
