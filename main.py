@@ -12,12 +12,12 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 try:
@@ -406,7 +406,7 @@ class SearchSummaryResponse(BaseModel):
     summary: Dict[str, Any]
 
 
-app = FastAPI(title='APICOSTX OSS Search MVP', version='0.2.0')
+app = FastAPI(title='Searchbox', version='0.1.0')
 
 
 @app.get('/health')
@@ -3942,7 +3942,7 @@ def _build_aggregate_search_result(
     use_science: bool,
 ) -> TavilySearchResult:
     sections: List[str] = [
-        f"# Searchbox Research Context",
+        "# Searchbox Research Context",
         f"Query: {query}",
         f"Request ID: {request_id}",
         f"Scientific retrieval used: {'yes' if use_science else 'no'}",
@@ -4003,7 +4003,6 @@ def _build_aggregate_search_result(
 async def search(req: SearchRequest, authorization: Optional[str] = Header(default=None)):
     _authorize(authorization, req.api_key)
     _STATUS['requests_total'] += 1
-    t0 = datetime.now()
     request_id = str(uuid.uuid4())
     
     requested_results = req.max_results or req.count or 1
@@ -4061,7 +4060,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         )
         answer = summary_payload.get('answer') if isinstance(summary_payload, dict) else None
 
-    scrapes_http = len([r for r in results if r.scraped and r.extract_method != "playwright_fallback" and not (r.source in {'arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar'})])
+    scrapes_http = len([r for r in results if r.scraped and r.extract_method != "playwright_fallback" and r.source not in {'arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar'}])
     scrapes_pw = len([r for r in results if r.scraped and r.extract_method == "playwright_fallback"])
     llm_usage = summary_payload.get('model_usage') if summary_payload else None
     usage_provider = (f'web+advanced:{_resolve_advanced_source(search_req)}' if use_science else SEARCH_PROVIDER)

@@ -19,4 +19,5 @@ for name in (
     'AGENTIC_DATA_API_KEY',
     'OANOR_API_KEY',
 ):
-    print(f'{name}: {'configured' if os.environ.get(name) else 'missing'}')
+    status = 'configured' if os.environ.get(name) else 'missing'
+    print(f'{name}: {status}')
