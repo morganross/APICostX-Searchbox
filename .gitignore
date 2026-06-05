@@ -18,3 +18,4 @@ htmlcov/
 # Internal/private operator notes
 docs/
 coverage.xml
+*.egg-info/

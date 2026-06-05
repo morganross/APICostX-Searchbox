@@ -45,6 +45,7 @@ dev = [
 
 [tool.setuptools]
 py-modules = ["main", "check_keys"]
+packages = ["searchbox"]
 
 [tool.ruff]
 line-length = 120

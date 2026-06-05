@@ -945,3 +945,15 @@ The smallest serious next step is Phase 0:
 4. Add aggregate science/non-science response tests.
 
 Once those pass, start the package skeleton.
+
+
+## Transitional Import Path
+
+During the refactor both import paths are expected to work:
+
+```bash
+uvicorn main:app
+uvicorn searchbox.app:app
+```
+
+The `searchbox.app:app` path currently bridges to the legacy top-level app until the route layer moves into the package.

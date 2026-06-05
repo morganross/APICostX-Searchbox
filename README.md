@@ -148,3 +148,15 @@ Searchbox is early open-source software. The service works, but the internals ar
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+
+## Transitional Import Path
+
+During the refactor both import paths are expected to work:
+
+```bash
+uvicorn main:app
+uvicorn searchbox.app:app
+```
+
+The `searchbox.app:app` path currently bridges to the legacy top-level app until the route layer moves into the package.
