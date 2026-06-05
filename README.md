@@ -1,6 +1,19 @@
 # Searchbox
 
-Searchbox is a self-hosted retrieval service for agents, research engines, and applications that need useful context from web search, scientific search, document APIs, and extracted full text.
+<p align="center">
+  <strong>Self-hosted retrieval for web search, scientific search, document extraction, and agent-ready context.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/morganross/APICostX-Searchbox/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/morganross/APICostX-Searchbox/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/morganross/APICostX-Searchbox/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/morganross/APICostX-Searchbox/actions/workflows/codeql.yml/badge.svg"></a>
+  <a href="https://github.com/morganross/APICostX-Searchbox/actions/workflows/secret-scan.yml"><img alt="Secret Scan" src="https://github.com/morganross/APICostX-Searchbox/actions/workflows/secret-scan.yml/badge.svg"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/morganross/APICostX-Searchbox"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/morganross/APICostX-Searchbox/badge"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+</p>
+
+Searchbox is a self-hosted retrieval gateway for agents, research engines, and applications that need useful context from web search, scientific search, document APIs, and extracted full text.
 
 It exposes a Tavily-style `/search` API, but can do more than ordinary web search: automatic science detection, scientific provider fanout, PDF/HTML extraction, long-document summarization, quota enforcement, cooldowns, and durable provider/LLM logs.
 
@@ -41,8 +54,8 @@ as the complete context package.
 ## Quickstart
 
 ```bash
-git clone https://github.com/searchbox/searchbox.git
-cd searchbox
+git clone https://github.com/morganross/APICostX-Searchbox.git
+cd APICostX-Searchbox
 python3 -m venv venv
 . venv/bin/activate
 pip install -r requirements.txt
@@ -59,9 +72,34 @@ curl -sS http://127.0.0.1:9000/health
 Search:
 
 ```bash
-curl -sS http://127.0.0.1:9000/search \
-  -H 'content-type: application/json' \
-  -d '{"query":"lithium dendrite solid electrolyte interface","max_results":1}'
+curl -sS http://127.0.0.1:9000/search   -H 'content-type: application/json'   -d '{"query":"lithium dendrite solid electrolyte interface","max_results":1}'
+```
+
+## Response Contract
+
+Searchbox may call several providers internally, but the recommended integration contract is intentionally simple:
+
+```python
+context = response["results"][0]["content"]
+```
+
+The first result is a Searchbox aggregate context package. It may include web context, scientific context, extracted text summaries, and source listings.
+
+## Configuration
+
+Start with `.env.example` and set only the providers you need.
+
+For local/private self-hosting, the convenient default is:
+
+```text
+AUTH_DISABLED=true
+```
+
+If Searchbox is exposed outside a trusted private network, enable auth:
+
+```text
+AUTH_DISABLED=false
+SEARCH_API_KEY=<strong random token>
 ```
 
 ## Documentation
@@ -75,26 +113,36 @@ Start with:
 - [API Reference](public-docs/reference/api.md)
 - [Configuration Reference](public-docs/reference/configuration.md)
 - [Provider Guide](public-docs/providers/README.md)
+- [Systemd Self-Hosting](public-docs/operations/systemd.md)
 - [Open Source Productization Roadmap](public-docs/open-source-productization-roadmap.md)
 
-## Auth Defaults
+## Project Health
 
-Searchbox is designed to be easy to self-host on a private machine or private network. Local/private deployments may run with:
+Searchbox uses the normal public-repo checks people expect from a serious Python service:
 
-```text
-AUTH_DISABLED=true
-```
+- GitHub Actions CI on supported Python versions
+- Ruff linting
+- Pytest test suite
+- CodeQL security analysis
+- Gitleaks secret scanning
+- OpenSSF Scorecard workflow
+- Dependabot update checks
+- Community health files: contributing, security, code of conduct, issue templates, and PR template
 
-If you expose Searchbox to the public internet, enable auth:
+## Development
 
-```text
-AUTH_DISABLED=false
-SEARCH_API_KEY=<strong random token>
+```bash
+python3 -m venv venv
+. venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+python -m py_compile main.py check_keys.py
 ```
 
 ## Status
 
-Searchbox is early open-source software. The core service works, but the public project is still being hardened with tests, CI, packaging, and refactoring.
+Searchbox is early open-source software. The service works, but the internals are still being refactored from a compact prototype into a cleaner package structure. Public API behavior and provider contracts should be protected by tests before large internal moves.
 
 ## License
 

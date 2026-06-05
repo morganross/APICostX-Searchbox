@@ -767,17 +767,17 @@ async def _normalize_search_query(req: Any) -> str:
 
     import re
     operators = re.findall(r'(?:OR\s+)?(?:site|date|filetype|ext):[^\s]+', query)
-    
+
     base_query = query
     for op in operators:
         base_query = base_query.replace(op, '')
-        
+
     base_query = re.sub(r'\s+', ' ', base_query).strip()
-    
+
     words = base_query.split()
     if len(words) <= 15:
         return query
-        
+
     if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE:
         try:
             resolved_llm = _resolve_llm_options(getattr(req, 'llm_options', None))
@@ -817,11 +817,11 @@ async def _normalize_search_query(req: Any) -> str:
     close_p = base_query.count(')')
     if open_p > close_p:
         base_query += ')' * (open_p - close_p)
-        
+
     final_query = base_query
     if operators:
         final_query += ' ' + ' '.join(operators)
-        
+
     return final_query.strip()
 
 
@@ -3488,7 +3488,7 @@ def _normalize_summary_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(parsed or {})
     normalized['found'] = bool(normalized.get('found', bool(str(normalized.get('answer') or '').strip())))
     normalized['answer'] = str(normalized.get('answer') or '').strip()
-    
+
     # Map follow_up_questions / open_questions robustly
     fups = normalized.get('follow_up_questions') or normalized.get('open_questions')
     if not isinstance(fups, list):
@@ -3496,7 +3496,7 @@ def _normalize_summary_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
     fups = [str(f).strip() for f in fups if str(f).strip()]
     normalized['follow_up_questions'] = fups
     normalized['open_questions'] = fups
-    
+
     for key in ('highlights',):
         value = normalized.get(key)
         if not isinstance(value, list):
@@ -3869,7 +3869,7 @@ def _calculate_searchbox_usage(
     billable_search_queries = 1 if is_web_plus_advanced else search_queries
     search_cost = 0.0 if (is_free_advanced_source or is_metered_advanced_source) else billable_search_queries * 0.001
     scrape_cost = 0.0 if (is_free_advanced_source or is_metered_advanced_source) else (scrapes_http * 0.0) + (scrapes_playwright * 0.005)
-    
+
     # Compute LLM costs using standard gpt-4o-mini rates if present
     llm_cost = 0.0
     if llm_usage:
@@ -3877,9 +3877,9 @@ def _calculate_searchbox_usage(
         completion_tokens = llm_usage.get("completion_tokens") or llm_usage.get("output_tokens") or 0
         # gpt-4o-mini rates: $0.150 / 1M input, $0.600 / 1M output
         llm_cost = (prompt_tokens * 0.00000015) + (completion_tokens * 0.0000006)
-        
+
     total_cost = search_cost + scrape_cost + llm_cost
-    
+
     return {
         "cost_schema_version": "searchbox-cost-v1",
         "search_provider": provider,
@@ -4004,7 +4004,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     _authorize(authorization, req.api_key)
     _STATUS['requests_total'] += 1
     request_id = str(uuid.uuid4())
-    
+
     requested_results = req.max_results or req.count or 1
     max_results = 1
     web_context_count = min(SERPER_MAX_COUNT, max(SEARCHBOX_WEB_CONTEXT_RESULTS, int(requested_results or 1)))
@@ -4022,7 +4022,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
             search_req.fetch_top_n = max_results
         if search_req.summarize_top_n is None:
             search_req.summarize_top_n = max_results
-            
+
     web_req = SearchRequest(**_model_dict(search_req))
     web_req.advanced_search = False
     web_req.topic = req.topic
@@ -4045,7 +4045,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         advanced_results = []
     search_req.advanced_search = use_science
     results = web_results + advanced_results
-    
+
     summary_payload = None
     answer = None
     if answer_requested:
@@ -4071,7 +4071,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         scrapes_playwright=scrapes_pw,
         llm_usage=llm_usage
     )
-    
+
     aggregate_result = _build_aggregate_search_result(
         query=req.query,
         request_id=request_id,
@@ -4083,14 +4083,14 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     if not (req.include_raw_content or use_science):
         aggregate_result.raw_content = None
     tavily_results = [aggregate_result]
-    
+
     global_images: List[Dict[str, Any]] = []
     if req.include_images:
         for item in results:
             for img in item.images or []:
                 if img.url and all(existing['url'] != img.url for existing in global_images):
                     global_images.append({"url": img.url, "description": img.description or ""})
-                    
+
     response_data = TavilySearchResponse(
         query=req.query,
         follow_up_questions=summary_payload.get('follow_up_questions') if summary_payload else None,
@@ -4100,7 +4100,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         usage=usage if (req.include_usage or getattr(req, "caller", None) == "aiq") else None,
         _searchbox_usage=usage
     )
-    
+
     headers = {
         "X-Searchbox-Usage-Total-Cost": str(usage.get("total_cost_usd", 0.0)),
         "X-Searchbox-Usage-Search-Cost": str(usage.get("search_cost_usd", 0.0)),
@@ -4109,7 +4109,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         "X-Searchbox-Usage-Search-Requests": str(usage.get("search_requests", 0)),
         "X-Searchbox-Usage-Scrape-Fetches": str(usage.get("scrape_fetches", 0)),
     }
-    
+
     dumped = response_data.model_dump() if hasattr(response_data, 'model_dump') else response_data.dict()
     # Filter out follow_up_questions/images/answer if None to match Tavily behavior
     if dumped.get('follow_up_questions') is None:
@@ -4120,7 +4120,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         dumped.pop('images', None)
     if dumped.get('usage') is None:
         dumped.pop('usage', None)
-        
+
     return JSONResponse(content=dumped, headers=headers)
 
 
@@ -4140,7 +4140,7 @@ async def search_get(
 ):
     inc_domains = [d.strip() for d in include_domains.split(',') if d.strip()] if include_domains else []
     exc_domains = [d.strip() for d in exclude_domains.split(',') if d.strip()] if exclude_domains else []
-    
+
     req = SearchRequest(
         query=q,
         max_results=max_results,

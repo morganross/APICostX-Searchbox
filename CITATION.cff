@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: Searchbox
+message: If Searchbox helps your research or software, please cite the repository.
+type: software
+authors:
+  - family-names: Ross
+    given-names: Morgan
+license: Apache-2.0
+repository-code: https://github.com/morganross/APICostX-Searchbox
+abstract: Self-hosted retrieval gateway for web and scientific search.
