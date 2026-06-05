@@ -9,19 +9,25 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 
 import httpx
-from bs4 import BeautifulSoup
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from searchbox.extraction import (
+    PLAYWRIGHT_AVAILABLE as _PLAYWRIGHT_AVAILABLE,
+    ExtractionSettings,
+    extract_content,
+    extract_with_playwright,
+    html_to_text,
+    pdf_to_text,
+)
 from searchbox.text import (
     boolish as _boolish,
     bounded_int as _bounded_int,
     chunk_text as _chunk_text,
     model_dict as _model_dict,
-    shorten as _shorten,
     truncate_payload as _truncate_payload,
 )
 from searchbox.urls import (
@@ -30,30 +36,11 @@ from searchbox.urls import (
     validate_fetch_url,
 )
 try:
-    import trafilatura
-except Exception:
-    trafilatura = None
-
-try:
-    from playwright.async_api import async_playwright
-    _PLAYWRIGHT_AVAILABLE = True
-except Exception:
-    async_playwright = None
-    _PLAYWRIGHT_AVAILABLE = False
-
-try:
     from litellm import completion as llm_completion
     _LITELLM_AVAILABLE = True
 except Exception:
     llm_completion = None
     _LITELLM_AVAILABLE = False
-
-try:
-    from pypdf import PdfReader
-    _PDF_AVAILABLE = True
-except Exception:
-    PdfReader = None
-    _PDF_AVAILABLE = False
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -826,27 +813,11 @@ def _resolve_llm_options(options: Optional[LLMOptions]) -> Dict[str, Any]:
 
 
 def _html_to_text(html: str) -> str:
-    if not html:
-        return ''
-    soup = BeautifulSoup(html, 'lxml')
-    for tag in soup(['script', 'style', 'noscript', 'svg', 'canvas', 'iframe']):
-        tag.decompose()
-    text = soup.get_text(' ', strip=True)
-    return re.sub(r'\s+', ' ', text).strip()
+    return html_to_text(html)
 
 
 def _pdf_to_text(data: bytes) -> str:
-    if not _PDF_AVAILABLE or PdfReader is None:
-        return ''
-    try:
-        import io
-        reader = PdfReader(io.BytesIO(data))
-        parts = []
-        for page in reader.pages:
-            parts.append(page.extract_text() or '')
-        return re.sub(r'\s+', ' ', ' '.join(parts)).strip()
-    except Exception:
-        return ''
+    return pdf_to_text(data)
 
 
 def _searxng_query_url() -> str:
@@ -1035,146 +1006,30 @@ async def _search_provider(req: SearchRequest, count: int) -> List[Dict[str, Any
         raise HTTPException(status_code=502, detail=f'Provider search failed: {type(exc).__name__}: {exc}') from exc
 
 
+def _extraction_settings() -> ExtractionSettings:
+    return ExtractionSettings(
+        user_agent=USER_AGENT,
+        max_redirects=MAX_REDIRECTS,
+        block_private_fetch_ips=BLOCK_PRIVATE_FETCH_IPS,
+        use_playwright=ENRICH_USE_PLAYWRIGHT,
+        playwright_timeout_ms=ENRICH_PLAYWRIGHT_TIMEOUT_MS,
+        playwright_max_chars=ENRICH_PLAYWRIGHT_MAX_CHARS,
+        min_content_chars=ENRICH_MIN_CONTENT_CHARS,
+        default_max_chars=ENRICH_DEFAULT_MAX_CHARS,
+    )
+
+
 async def _extract_with_playwright(url: str) -> Dict[str, Any]:
-    if async_playwright is None:
-        return {
-            'method': 'playwright_unavailable',
-            'content': None,
-            'error': 'playwright_import_missing',
-        }
-
-    t0 = datetime.now()
-    html = None
-    page = None
-    browser = None
-    context = None
-
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent=USER_AGENT)
-            page = await context.new_page()
-            await page.goto(url, wait_until='domcontentloaded', timeout=ENRICH_PLAYWRIGHT_TIMEOUT_MS)
-            try:
-                await page.wait_for_load_state('networkidle', timeout=3000)
-            except Exception:
-                pass
-            html = await page.content()
-    except Exception as exc:
-        return {
-            'method': 'playwright_fallback',
-            'content': None,
-            'error': f'{type(exc).__name__}: {exc}',
-            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
-        }
-    finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
-        if context is not None:
-            try:
-                await context.close()
-            except Exception:
-                pass
-        if browser is not None:
-            try:
-                await browser.close()
-            except Exception:
-                pass
-
-    text = _html_to_text(html)
-    text = _shorten(text, ENRICH_PLAYWRIGHT_MAX_CHARS)
-
-    return {
-        'method': 'playwright_fallback',
-        'content': text if text else None,
-        'error': None if text else 'playwright_content_empty',
-        'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
-    }
+    return await extract_with_playwright(
+        url,
+        user_agent=USER_AGENT,
+        timeout_ms=ENRICH_PLAYWRIGHT_TIMEOUT_MS,
+        max_chars=ENRICH_PLAYWRIGHT_MAX_CHARS,
+    )
 
 
 async def _extract_content(url: str, timeout_s: float) -> Dict[str, Any]:
-    _validate_fetch_url(url)
-    headers = {'User-Agent': USER_AGENT}
-    t0 = datetime.now()
-
-    html = None
-    body = b''
-    fetch_error = None
-    method = 'failed'
-    fetch_ms = 0
-    http_status = None
-    content_type = None
-    canonical_url = url
-
-    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_s) as client:
-        current_url = url
-        for attempt in range(2):
-            try:
-                for _ in range(MAX_REDIRECTS + 1):
-                    _validate_fetch_url(current_url)
-                    response = await client.get(current_url, headers=headers)
-                    http_status = response.status_code
-                    canonical_url = str(response.url)
-                    content_type = response.headers.get('content-type')
-                    if response.status_code in (301, 302, 303, 307, 308) and response.headers.get('location'):
-                        current_url = urljoin(current_url, response.headers['location'])
-                        continue
-                    response.raise_for_status()
-                    body = response.content
-                    html = response.text if 'text' in (content_type or '') or 'html' in (content_type or '') else None
-                    fetch_ms = int((datetime.now() - t0).total_seconds() * 1000)
-                    break
-                break
-            except Exception as exc:
-                fetch_ms = int((datetime.now() - t0).total_seconds() * 1000)
-                fetch_error = f'{type(exc).__name__}: {exc}'
-                if attempt == 0:
-                    await asyncio.sleep(0.2)
-                    continue
-
-    text = None
-    if (content_type or '').lower().split(';', 1)[0] == 'application/pdf' or canonical_url.lower().endswith('.pdf'):
-        text = _pdf_to_text(body)
-        method = 'pdf_pypdf' if text else 'pdf_unavailable_or_empty'
-
-    if not text and html and trafilatura is not None:
-        text = trafilatura.extract(html)
-        method = 'trafilatura' if text else 'trafilatura_empty'
-
-    if not text:
-        text = _html_to_text(html)
-        method = 'bs4_fallback' if text else 'bs4_fallback'
-
-    if (not text or len(text) < ENRICH_MIN_CONTENT_CHARS) and ENRICH_USE_PLAYWRIGHT and _PLAYWRIGHT_AVAILABLE:
-        playwright_result = await _extract_with_playwright(url)
-        pw_method = playwright_result.get('method')
-        if playwright_result.get('content') and len(playwright_result['content']) > len(text or ''):
-            text = playwright_result.get('content')
-            method = pw_method
-        if playwright_result.get('error') and (not text):
-            fetch_error = (fetch_error + ' | ' if fetch_error else '') + playwright_result.get('error')
-        elif not fetch_error:
-            fetch_error = None
-        fetch_ms = max(fetch_ms, int(playwright_result.get('fetch_ms') or 0))
-
-    text = _shorten((text or '').strip(), ENRICH_DEFAULT_MAX_CHARS)
-
-    return {
-        'content': text if text else None,
-        'scraped': bool(text),
-        'content_chars': len(text or ''),
-        'fetch_ms': int(fetch_ms),
-        'error': None if text else (fetch_error or 'no_content_extracted'),
-        'extract_method': method if text else 'failed',
-        'fetch_status': 'ok' if text else 'failed',
-        'http_status': http_status,
-        'content_type': content_type,
-        'failure_reason': None if text else (fetch_error or method or 'no_content_extracted'),
-        'canonical_url': canonical_url,
-    }
+    return await extract_content(url, timeout_s, settings=_extraction_settings())
 
 
 _ARXIV_STOPWORDS = {

@@ -98,3 +98,11 @@ def test_aggregate_science_section_toggle():
     assert "# Scientific Context" not in web_only.content
     assert "# Scientific Context" in science.content
     assert science.url == "searchbox://aggregate/science"
+
+def test_extraction_helpers_are_available():
+    from searchbox.extraction import ExtractionSettings, html_to_text, pdf_to_text
+
+    html = '<html><script>bad()</script><p>Hello <b>world</b></p></html>'
+    assert html_to_text(html) == "Hello world"
+    assert pdf_to_text(b"not a pdf") == ""
+    assert ExtractionSettings(user_agent="test-agent").user_agent == "test-agent"
