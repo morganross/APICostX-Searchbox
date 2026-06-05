@@ -18,3 +18,7 @@ Searchbox is being hardened from a compact working prototype into a professional
 - More provider adapters.
 - Better extraction benchmarks.
 - Better engine-specific integration examples.
+
+## Refactor Plan
+
+The detailed package refactor plan lives in [`public-docs/main-file-refactor-plan.md`](public-docs/main-file-refactor-plan.md).

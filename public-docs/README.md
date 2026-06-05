@@ -39,6 +39,7 @@ client -> /search
 - [Security](security.md): auth, secrets, logs, and network fetch safety.
 - [Contributing](contributing.md): how to add providers and improve Searchbox.
 - [Open Source Productization Roadmap](open-source-productization-roadmap.md): what must change before public release.
+- [Main File Refactor Plan](main-file-refactor-plan.md): phased plan for breaking up `main.py` into a real package.
 - [Examples](examples/README.md): curl, Python, JavaScript, and engine integration.
 
 ## Public Contract

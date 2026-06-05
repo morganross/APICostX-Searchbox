@@ -115,6 +115,7 @@ Start with:
 - [Provider Guide](public-docs/providers/README.md)
 - [Systemd Self-Hosting](public-docs/operations/systemd.md)
 - [Open Source Productization Roadmap](public-docs/open-source-productization-roadmap.md)
+- [Main File Refactor Plan](public-docs/main-file-refactor-plan.md)
 
 ## Project Health
 
