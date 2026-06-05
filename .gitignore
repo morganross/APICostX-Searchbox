@@ -14,3 +14,6 @@ logs/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Internal/private operator notes
+docs/

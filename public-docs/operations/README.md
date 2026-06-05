@@ -31,3 +31,7 @@ Keep these on persistent storage:
 - Private IP fetch blocking enabled if available.
 - Log endpoints protected.
 - `/config` checked for secret leakage.
+
+## Self-Hosted Linux Service
+
+For a normal non-container deployment, see [Systemd Self-Hosting](systemd.md).

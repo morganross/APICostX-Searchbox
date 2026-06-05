@@ -35,6 +35,7 @@ client -> /search
 - [Providers](providers/README.md): web and scientific provider guides.
 - [Architecture](architecture/README.md): request flow, aggregation, extraction, quotas.
 - [Operations](operations/README.md): logs, health, cooldowns, troubleshooting.
+- [Systemd Self-Hosting](operations/systemd.md): run Searchbox as a normal Linux service without Docker.
 - [Security](security.md): auth, secrets, logs, and network fetch safety.
 - [Contributing](contributing.md): how to add providers and improve Searchbox.
 - [Open Source Productization Roadmap](open-source-productization-roadmap.md): what must change before public release.
