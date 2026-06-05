@@ -230,6 +230,15 @@ _STATUS = {
 
 
 # Transitional compatibility imports stay after .env loading until config moves into searchbox.config.
+from searchbox.logging_utils import (  # noqa: E402
+    append_jsonl as _append_jsonl,
+    summarize_events as _summarize_events,
+    tail_jsonl as _tail_jsonl,
+)
+from searchbox.state.json_store import (  # noqa: E402
+    read_json_file_locked as _read_json_file_locked,
+    write_json_file_locked as _write_json_file_locked,
+)
 from searchbox.defaults import BRAVE_DEFAULT_COUNT, BRAVE_MAX_COUNT, SERPER_DEFAULT_COUNT, SERPER_MAX_COUNT  # noqa: E402
 from searchbox.models import (  # noqa: E402,F401
     ImageItem,
@@ -448,39 +457,10 @@ def _authorize(authorization: Optional[str], api_key: Optional[str] = None) -> N
     _check_rate_limit(_auth_key_from_header_or_key(authorization, api_key))
 
 
-def _json_safe(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except Exception:
-        return str(value)
 
 
-def _append_jsonl(path: str, event: Dict[str, Any]) -> None:
-    try:
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        payload = {k: _json_safe(v) for k, v in event.items() if v is not None}
-        with open(path, 'a', encoding='utf-8') as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.write(json.dumps(payload, sort_keys=True) + '\n')
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    except Exception as exc:
-        _STATUS['last_error'] = f'log_write:{type(exc).__name__}: {exc}'
 
 
-def _tail_jsonl(path: str, limit: int) -> List[Dict[str, Any]]:
-    limit = max(1, min(int(limit or 100), SEARCHBOX_LOG_API_MAX_LINES))
-    if not os.path.exists(path):
-        return []
-    with open(path, 'r', encoding='utf-8') as fh:
-        rows = deque(fh, maxlen=limit)
-    parsed = []
-    for row in rows:
-        try:
-            parsed.append(json.loads(row))
-        except Exception:
-            parsed.append({'malformed': row.strip()})
-    return parsed
 
 
 def _log_llm_attempt(event: Dict[str, Any]) -> None:
@@ -500,18 +480,6 @@ def _log_provider_event(event: Dict[str, Any]) -> None:
     _append_jsonl(PROVIDER_EVENT_LOG_FILE, event)
 
 
-def _summarize_events(events: List[Dict[str, Any]], group_fields: List[str]) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {'total': len(events), 'groups': {}}
-    for event in events:
-        key = '|'.join(str(event.get(field) or 'unknown') for field in group_fields)
-        group = summary['groups'].setdefault(key, {'total': 0, 'success': 0, 'failure': 0, 'last_event': None})
-        group['total'] += 1
-        if event.get('success') is True:
-            group['success'] += 1
-        elif event.get('success') is False:
-            group['failure'] += 1
-        group['last_event'] = event.get('timestamp')
-    return summary
 
 
 
@@ -1249,48 +1217,10 @@ def _advanced_provider_names() -> List[str]:
     return ['arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar']
 
 
-def _advanced_provider_file_paths(path_value: str) -> tuple[str, str]:
-    data_file = path_value
-    data_dir = os.path.dirname(data_file) or '.'
-    os.makedirs(data_dir, exist_ok=True)
-    return data_file, data_file + '.lock'
 
 
-def _read_json_file_locked(path_value: str) -> Dict[str, Any]:
-    data_file, lock_file = _advanced_provider_file_paths(path_value)
-    with open(lock_file, 'a+', encoding='utf-8') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
-        try:
-            try:
-                with open(data_file, 'r', encoding='utf-8') as fh:
-                    data = json.load(fh)
-            except Exception:
-                data = {}
-            return data if isinstance(data, dict) else {}
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _write_json_file_locked(path_value: str, mutator) -> Dict[str, Any]:
-    data_file, lock_file = _advanced_provider_file_paths(path_value)
-    with open(lock_file, 'a+', encoding='utf-8') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            try:
-                with open(data_file, 'r', encoding='utf-8') as fh:
-                    data = json.load(fh)
-            except Exception:
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
-            result = mutator(data)
-            tmp_file = data_file + '.tmp'
-            with open(tmp_file, 'w', encoding='utf-8') as fh:
-                json.dump(data, fh, sort_keys=True)
-            os.replace(tmp_file, data_file)
-            return result if isinstance(result, dict) else {}
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _advanced_provider_base_cooldown_seconds(provider: str, status_code: int) -> int:
