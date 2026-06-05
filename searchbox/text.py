@@ -43,3 +43,10 @@ def chunk_text(text: str, chunks_per_source: int | None) -> str:
             break
         chunks.append(f"<chunk {idx + 1}> {chunk}")
     return " [...] ".join(chunks)
+
+
+def truncate_payload(value: str, max_chars: int) -> str:
+    text = value or ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n[truncated]"
