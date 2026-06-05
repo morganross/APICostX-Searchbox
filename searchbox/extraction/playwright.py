@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from searchbox.text import shorten
@@ -32,7 +32,7 @@ async def extract_with_playwright(
             "error": "playwright_import_missing",
         }
 
-    t0 = datetime.now()
+    t0 = datetime.now(timezone.utc)
     html = None
     page = None
     browser = None
@@ -46,32 +46,32 @@ async def extract_with_playwright(
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             try:
                 await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
+            except Exception as exc:
+                _ = str(exc)
             html = await page.content()
     except Exception as exc:
         return {
             "method": "playwright_fallback",
             "content": None,
             "error": f"{type(exc).__name__}: {exc}",
-            "fetch_ms": int((datetime.now() - t0).total_seconds() * 1000),
+            "fetch_ms": int((datetime.now(timezone.utc) - t0).total_seconds() * 1000),
         }
     finally:
         if page is not None:
             try:
                 await page.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _ = str(exc)
         if context is not None:
             try:
                 await context.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _ = str(exc)
         if browser is not None:
             try:
                 await browser.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _ = str(exc)
 
     text = html_to_text(html)
     text = shorten(text, max_chars)
@@ -80,5 +80,5 @@ async def extract_with_playwright(
         "method": "playwright_fallback",
         "content": text if text else None,
         "error": None if text else "playwright_content_empty",
-        "fetch_ms": int((datetime.now() - t0).total_seconds() * 1000),
+        "fetch_ms": int((datetime.now(timezone.utc) - t0).total_seconds() * 1000),
     }

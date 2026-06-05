@@ -61,9 +61,9 @@ curl -sS http://127.0.0.1:9000/search \
 
 `query`: required user query.
 
-`max_results`: compatibility field. Searchbox may fetch multiple internal sources but returns one recommended aggregate result.
+`max_results`: compatibility/count hint. Searchbox may fetch multiple internal sources but returns one aggregate result.
 
-`include_raw_content`: requests fuller extracted text where available.
+`include_raw_content`: tolerated compatibility field. Searchbox may include fuller extracted text where available even when callers omit or disable this flag.
 
 `include_usage`: includes usage metadata.
 
@@ -73,7 +73,7 @@ curl -sS http://127.0.0.1:9000/search \
 
 ### Response Contract
 
-Searchbox returns a Tavily-like response. The recommended engine-facing field is:
+Searchbox returns a Tavily-like response with exactly one aggregate result. The recommended engine-facing field is:
 
 ```text
 results[0].content
@@ -84,11 +84,13 @@ Example shape:
 ```json
 {
   "query": "...",
-  "answer": null,
+  "answer": "Synthesized answer from all gathered sources...",
   "results": [
     {
       "title": "Searchbox research context for: ...",
-      "url": "searchbox://aggregate/<request_id>",
+      "url": "https://example-source.test/article",
+      "searchbox_url": "searchbox://aggregate/<request_id>",
+      "aggregate_url": "searchbox://aggregate/<request_id>",
       "content": "# Searchbox Research Context\n...",
       "raw_content": "...",
       "score": 1.0
@@ -97,7 +99,7 @@ Example shape:
 }
 ```
 
-The `searchbox://aggregate/...` URL is a synthetic identifier, not a browser URL.
+The `searchbox_url` and `aggregate_url` fields contain the synthetic `searchbox://aggregate/...` identifier. The primary `url` is an HTTP(S) source URL when one is available so document-oriented engines can accept the aggregate result. If scientific retrieval is selected but all scientific providers fail or are cooling down, `results[0].content` includes a `# Retrieval Notes` section and still returns the available web context.
 
 ## `GET /search`
 
@@ -105,7 +107,7 @@ GET wrapper for manual tests. Prefer `POST /search` for integrations.
 
 ## `POST /search-summary`
 
-Search plus LLM synthesis endpoint. Use this when you want Searchbox to generate an answer rather than only return context.
+Compatibility synthesis endpoint. Normal `/search` already generates the synthesized answer and aggregate context.
 
 ## `GET /health/monitor`
 
@@ -131,4 +133,4 @@ curl -sS 'http://127.0.0.1:9000/logs/provider-events?limit=100'
 
 ## `GET /search-raw`
 
-Lower-level diagnostic endpoint. It should not be the primary public integration path.
+Compatibility endpoint for older callers. It delegates to the same one-result intelligent search contract as `/search`.

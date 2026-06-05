@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -23,7 +23,7 @@ def append_jsonl(path: str, event: dict[str, Any]) -> None:
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         event = {str(k): json_safe(v) for k, v in dict(event or {}).items()}
-        event.setdefault("timestamp", datetime.utcnow().isoformat() + "Z")
+        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
     except Exception:
@@ -37,10 +37,13 @@ def tail_jsonl(path: str, max_lines: int) -> list[dict[str, Any]]:
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
+                parsed = None
                 try:
-                    rows.append(json.loads(line))
+                    parsed = json.loads(line)
                 except Exception:
-                    continue
+                    parsed = None
+                if parsed is not None:
+                    rows.append(parsed)
     except Exception:
         return []
     return list(rows)

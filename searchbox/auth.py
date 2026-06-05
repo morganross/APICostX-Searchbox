@@ -23,7 +23,7 @@ def auth_key_from_header_or_key(
         return "anonymous"
     token = None
     if authorization and authorization.startswith("Bearer "):
-        token = authorization[len("Bearer "):].strip()
+        token = authorization[len("Bearer ") :].strip()
     elif api_key:
         token = api_key.strip()
 

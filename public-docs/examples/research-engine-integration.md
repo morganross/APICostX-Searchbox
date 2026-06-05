@@ -4,7 +4,7 @@ Searchbox is designed for engines that expect a search tool.
 
 ## Recommended Use
 
-Send the user query to `/search` and read:
+Send the user query to `/search` and read the single aggregate result:
 
 ```text
 response.results[0].content
@@ -28,4 +28,4 @@ lithium AND dendrite AND solid AND electrolyte AND interface
 
 ## Timeouts
 
-Science retrieval can take longer because Searchbox may call several providers, fetch PDFs, extract text, and summarize documents. Use a client timeout around 60-120 seconds for full scientific retrieval.
+Science retrieval can take longer because Searchbox may call several providers, fetch PDFs, extract text, and summarize documents. Use a client timeout around 60-120 seconds for full scientific retrieval. The response still contains one result; clients should not expect multiple result objects.

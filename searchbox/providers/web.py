@@ -48,17 +48,19 @@ def parse_brave_results(data: dict[str, Any], limit: int) -> list[dict[str, Any]
             continue
         if len(parsed) >= limit:
             break
-        parsed.append({
-            "rank": idx,
-            "title": (item.get("title") or "").strip(),
-            "url": (item.get("url") or "").strip(),
-            "description": (item.get("description") or "").strip()[:3000],
-            "published": item.get("published") or None,
-            "language": item.get("language") or None,
-            "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
-            "source": "brave",
-            "engine": "brave",
-        })
+        parsed.append(
+            {
+                "rank": idx,
+                "title": (item.get("title") or "").strip(),
+                "url": (item.get("url") or "").strip(),
+                "description": (item.get("description") or "").strip()[:3000],
+                "published": item.get("published") or None,
+                "language": item.get("language") or None,
+                "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
+                "source": "brave",
+                "engine": "brave",
+            }
+        )
     return parsed
 
 
@@ -70,25 +72,27 @@ def parse_serper_results(data: dict[str, Any], limit: int) -> list[dict[str, Any
             continue
         if len(parsed) >= limit:
             break
-        parsed.append({
-            "rank": int(item.get("position") or idx),
-            "title": (item.get("title") or "").strip(),
-            "url": (item.get("link") or "").strip(),
-            "description": (item.get("snippet") or "").strip()[:3000],
-            "published": item.get("date") or None,
-            "language": None,
-            "score": None,
-            "source": "serper",
-            "engine": "google",
-            "images": [
-                {
-                    "url": img.get("imageUrl") or img.get("thumbnailUrl") or img.get("link") or "",
-                    "description": img.get("title") or img.get("source"),
-                }
-                for img in (item.get("images") or [])
-                if isinstance(img, dict) and (img.get("imageUrl") or img.get("thumbnailUrl") or img.get("link"))
-            ],
-        })
+        parsed.append(
+            {
+                "rank": int(item.get("position") or idx),
+                "title": (item.get("title") or "").strip(),
+                "url": (item.get("link") or "").strip(),
+                "description": (item.get("snippet") or "").strip()[:3000],
+                "published": item.get("date") or None,
+                "language": None,
+                "score": None,
+                "source": "serper",
+                "engine": "google",
+                "images": [
+                    {
+                        "url": img.get("imageUrl") or img.get("thumbnailUrl") or img.get("link") or "",
+                        "description": img.get("title") or img.get("source"),
+                    }
+                    for img in (item.get("images") or [])
+                    if isinstance(img, dict) and (img.get("imageUrl") or img.get("thumbnailUrl") or img.get("link"))
+                ],
+            }
+        )
     return parsed
 
 
@@ -100,17 +104,19 @@ def parse_searxng_results(data: dict[str, Any], limit: int) -> list[dict[str, An
             continue
         if len(parsed) >= limit:
             break
-        parsed.append({
-            "rank": idx,
-            "title": (item.get("title") or "").strip(),
-            "url": (item.get("url") or "").strip(),
-            "description": (item.get("content") or "").strip()[:3000],
-            "published": item.get("publishedDate") or item.get("published") or None,
-            "language": item.get("language") or None,
-            "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
-            "source": "searxng",
-            "engine": item.get("engine") if isinstance(item.get("engine"), str) else None,
-        })
+        parsed.append(
+            {
+                "rank": idx,
+                "title": (item.get("title") or "").strip(),
+                "url": (item.get("url") or "").strip(),
+                "description": (item.get("content") or "").strip()[:3000],
+                "published": item.get("publishedDate") or item.get("published") or None,
+                "language": item.get("language") or None,
+                "score": item.get("score") if isinstance(item.get("score"), (int, float)) else None,
+                "source": "searxng",
+                "engine": item.get("engine") if isinstance(item.get("engine"), str) else None,
+            }
+        )
     return parsed
 
 

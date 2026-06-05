@@ -27,7 +27,7 @@ dependencies = [
   "litellm>=1.0,<2",
   "playwright>=1.40,<2",
   "pydantic>=2,<3",
-  "pypdf>=4,<6",
+  "pypdf>=6.10.2,<7",
   "python-dotenv>=1,<2",
   "trafilatura>=1.8,<3",
   "uvicorn[standard]>=0.27,<1",
@@ -35,7 +35,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8,<9",
+  "hypothesis>=6,<7",
+  "pytest>=9.0.3,<10",
   "pytest-asyncio>=0.23,<1",
   "ruff>=0.5,<1",
   "pip-audit>=2.7,<3",
@@ -45,7 +46,10 @@ dev = [
 
 [tool.setuptools]
 py-modules = ["main", "check_keys"]
-packages = ["searchbox"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["searchbox*"]
 
 [tool.ruff]
 line-length = 120

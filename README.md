@@ -87,7 +87,7 @@ The first result is a Searchbox aggregate context package. It may include web co
 
 ## Configuration
 
-Start with `.env.example` and set only the providers you need.
+Start with `.env.example` and set only the providers you need. The one-result contract requires the summarizer path, so set `SUMMARIZER_ENABLED=true` and configure an LLM key for production-quality answers.
 
 For local/private self-hosting, the convenient default is:
 

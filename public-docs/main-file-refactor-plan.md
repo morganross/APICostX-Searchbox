@@ -621,7 +621,7 @@ Add tests for:
 
 - `/health` and `/config` public safety
 - `/search` returns exactly one aggregate result
-- aggregate URL starts with `searchbox://aggregate/`
+- aggregate metadata fields `searchbox_url` and `aggregate_url` start with `searchbox://aggregate/`; primary `url` is HTTP(S) when a source URL is available
 - `results[0].content` includes web/science section rules
 - SerpApi monthly quota snapshot and reserve behavior
 - daily quota reserve behavior

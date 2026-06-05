@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -68,13 +68,15 @@ def mark_success(cooldown_file: str, provider: str, log_event: Callable[[dict[st
 
     def mutate(data: dict[str, Any]) -> dict[str, Any]:
         entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
-        entry.update({
-            "cooldown_until_epoch": 0,
-            "failure_count": 0,
-            "last_success_at": datetime.utcnow().isoformat() + "Z",
-        })
+        entry.update(
+            {
+                "cooldown_until_epoch": 0,
+                "failure_count": 0,
+                "last_success_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+        )
         data[provider] = entry
-        return entry
+        return data
 
     write_json_file_locked(cooldown_file, mutate)
 
@@ -95,35 +97,45 @@ def mark_failure(
     def mutate(data: dict[str, Any]) -> dict[str, Any]:
         entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
         failure_count = int(entry.get("failure_count") or 0) + 1
-        base = int(retry_after) if retry_after is not None else base_cooldown_seconds(
-            provider,
-            status_code,
-            arxiv_cooldown_seconds=arxiv_cooldown_seconds,
+        base = (
+            int(retry_after)
+            if retry_after is not None
+            else base_cooldown_seconds(
+                provider,
+                status_code,
+                arxiv_cooldown_seconds=arxiv_cooldown_seconds,
+            )
         )
         cooldown = min(max_cooldown_seconds, max(30, base * (2 ** max(0, failure_count - 1))))
-        entry.update({
-            "cooldown_until_epoch": now + cooldown,
-            "failure_count": failure_count,
-            "last_status_code": status_code,
-            "last_reason": reason,
-            "last_failure_at": datetime.utcnow().isoformat() + "Z",
-        })
+        entry.update(
+            {
+                "cooldown_until_epoch": now + cooldown,
+                "failure_count": failure_count,
+                "last_status_code": status_code,
+                "last_reason": reason,
+                "last_failure_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+        )
         data[provider] = entry
-        return {"retry_after_seconds": int(cooldown), "failure_count": failure_count}
+        entry["retry_after_seconds"] = int(cooldown)
+        data[provider] = entry
+        return data
 
     result = write_json_file_locked(cooldown_file, mutate)
-    retry_seconds = int(result.get("retry_after_seconds") or base_cooldown_seconds(
-        provider,
-        status_code,
-        arxiv_cooldown_seconds=arxiv_cooldown_seconds,
-    ))
-    log_event({
-        "event": "failure",
-        "provider": provider,
-        "success": False,
-        "status_code": status_code,
-        "reason": reason,
-        "retry_after_seconds": retry_seconds,
-        "failure_count": result.get("failure_count"),
-    })
+    provider_state = result.get(provider, {}) if isinstance(result, dict) else {}
+    retry_seconds = int(
+        provider_state.get("retry_after_seconds")
+        or base_cooldown_seconds(provider, status_code, arxiv_cooldown_seconds=arxiv_cooldown_seconds)
+    )
+    log_event(
+        {
+            "event": "failure",
+            "provider": provider,
+            "success": False,
+            "status_code": status_code,
+            "reason": reason,
+            "retry_after_seconds": retry_seconds,
+            "failure_count": provider_state.get("failure_count"),
+        }
+    )
     return retry_seconds

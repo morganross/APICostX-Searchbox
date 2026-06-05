@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from .models import SearchItem, TavilySearchResult
 from .text import truncate_payload
@@ -30,6 +31,15 @@ def aggregate_source_block(item: SearchItem, index: int, kind: str, max_chars: i
     return "\n".join(parts).strip()
 
 
+def _first_http_source_url(items: list[SearchItem], fallback: str) -> str:
+    for item in items:
+        candidate = (item.url or item.canonical_url or "").strip()
+        parsed = urlparse(candidate)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return candidate
+    return fallback
+
+
 def build_aggregate_search_result(
     *,
     query: str,
@@ -38,6 +48,7 @@ def build_aggregate_search_result(
     science_results: list[SearchItem],
     classifier_result: dict[str, Any],
     use_science: bool,
+    summary_payload: dict[str, Any] | None = None,
     content_max_chars: int,
     raw_content_max_chars: int,
 ) -> TavilySearchResult:
@@ -55,6 +66,28 @@ def build_aggregate_search_result(
             f"reason={classifier_result.get('reason') or classifier_result.get('category') or 'n/a'}"
         )
 
+    if summary_payload:
+        answer = str(summary_payload.get("answer") or "").strip()
+        highlights = summary_payload.get("highlights")
+        confidence = summary_payload.get("confidence")
+        sections.append("\n# Summary")
+        sections.append(answer or "No summary text was returned by the summarizer.")
+        if isinstance(highlights, list) and highlights:
+            sections.append("\n# Highlights")
+            sections.extend(f"- {str(item).strip()}" for item in highlights if str(item).strip())
+        if confidence is not None:
+            sections.append(f"Summary confidence: {confidence}")
+
+    science_error = (classifier_result or {}).get("science_retrieval_error")
+    if science_error:
+        sections.append("\n# Retrieval Notes")
+        status_code = science_error.get("status_code") if isinstance(science_error, dict) else None
+        detail = science_error.get("detail") if isinstance(science_error, dict) else science_error
+        sections.append(
+            "Scientific retrieval was selected for this query, but the scientific provider layer did not return usable results. "
+            f"Status: {status_code or 'unknown'}. Detail: {detail}"
+        )
+
     sections.append("\n# Web Context")
     if web_results:
         for idx, item in enumerate(web_results, start=1):
@@ -68,7 +101,9 @@ def build_aggregate_search_result(
             for idx, item in enumerate(science_results, start=1):
                 sections.append(aggregate_source_block(item, idx, "scientific", 3500))
         else:
-            sections.append("The query was classified as scientific, but no scientific provider returned usable content.")
+            sections.append(
+                "The query was classified as scientific, but no scientific provider returned usable content."
+            )
 
     sources: list[str] = []
     all_items = [*web_results, *science_results]
@@ -90,10 +125,13 @@ def build_aggregate_search_result(
             raw_sections.append(f"\n## Raw Source {idx}: {item.title or item.url or 'Untitled'}\n{raw}")
     aggregate_raw = truncate_payload("\n".join(raw_sections).strip(), raw_content_max_chars)
 
+    internal_url = f"searchbox://aggregate/{request_id}"
     return TavilySearchResult(
         title=f"Searchbox research context for: {query}",
-        url=f"searchbox://aggregate/{request_id}",
+        url=_first_http_source_url(all_items, internal_url),
         content=aggregate_content,
         raw_content=aggregate_raw,
         score=1.0,
+        searchbox_url=internal_url,
+        aggregate_url=internal_url,
     )

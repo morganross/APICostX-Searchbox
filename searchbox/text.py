@@ -38,7 +38,7 @@ def chunk_text(text: str, chunks_per_source: int | None) -> str:
     cleaned = re.sub(r"\s+", " ", text).strip()
     for idx in range(count):
         start = idx * 500
-        chunk = cleaned[start:start + 500].strip()
+        chunk = cleaned[start : start + 500].strip()
         if not chunk:
             break
         chunks.append(f"<chunk {idx + 1}> {chunk}")

@@ -44,6 +44,8 @@ def write_json_file_locked(path_value: str, mutator: Callable[[dict[str, Any]], 
             if not isinstance(data, dict):
                 data = {}
             result = mutator(data)
+            if isinstance(result, dict) and result is not data:
+                data = result
             tmp_file = data_file + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, sort_keys=True)

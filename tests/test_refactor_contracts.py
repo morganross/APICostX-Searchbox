@@ -110,15 +110,18 @@ def test_aggregate_science_section_toggle():
     )
     assert "# Scientific Context" not in web_only.content
     assert "# Scientific Context" in science.content
-    assert science.url == "searchbox://aggregate/science"
+    assert science.url == "https://example.com"
+    assert science.searchbox_url == "searchbox://aggregate/science"
+
 
 def test_extraction_helpers_are_available():
     from searchbox.extraction import ExtractionSettings, html_to_text, pdf_to_text
 
-    html = '<html><script>bad()</script><p>Hello <b>world</b></p></html>'
+    html = "<html><script>bad()</script><p>Hello <b>world</b></p></html>"
     assert html_to_text(html) == "Hello world"
     assert pdf_to_text(b"not a pdf") == ""
     assert ExtractionSettings(user_agent="test-agent").user_agent == "test-agent"
+
 
 def test_web_provider_parsers_are_available():
     from searchbox.providers.web import WebSearchOptions, parse_serper_results
@@ -127,6 +130,7 @@ def test_web_provider_parsers_are_available():
     assert rows[0]["source"] == "serper"
     assert rows[0]["url"] == "https://example.com"
     assert WebSearchOptions(query="query", count=1).query == "query"
+
 
 def test_auth_module_preserves_status_codes():
     from searchbox.auth import AuthSettings, auth_key_from_header_or_key
@@ -157,65 +161,65 @@ def test_rate_limiter_enforces_minute_bucket():
 
 
 def _test_req_factory(**kwargs):
-    return type('Req', (), kwargs)()
+    return type("Req", (), kwargs)()
 
 
 def _new_test_item(**kwargs):
     return _SearchItemForTests(
-        rank=kwargs.pop('rank', 1),
-        title=kwargs.pop('title', 'Example'),
-        url=kwargs.pop('url', 'https://example.com'),
-        content=kwargs.pop('content', 'sample content about science'),
-        description=kwargs.pop('description', 'summary'),
-        source=kwargs.pop('source', 'test'),
+        rank=kwargs.pop("rank", 1),
+        title=kwargs.pop("title", "Example"),
+        url=kwargs.pop("url", "https://example.com"),
+        content=kwargs.pop("content", "sample content about science"),
+        description=kwargs.pop("description", "summary"),
+        source=kwargs.pop("source", "test"),
         **kwargs,
     )
 
 
 def test_refactored_search_option_helpers():
     assert resolve_max_results(_test_req_factory(max_results=3), default_count=5, max_count=10) == 3
-    assert resolve_include_content(_test_req_factory(response_mode='search_with_content')) is True
-    assert resolve_include_answer(_test_req_factory(response_mode='search_only')) is False
-    assert resolve_searxng_time_range(_test_req_factory(time_range='month')) == 'month'
-    assert resolve_serper_tbs(_test_req_factory(days=7)) == 'qdr:d7'
-    assert resolve_search_depth(_test_req_factory(search_depth='advanced')) == 'advanced'
+    assert resolve_include_content(_test_req_factory(response_mode="search_with_content")) is True
+    assert resolve_include_answer(_test_req_factory(response_mode="search_only")) is False
+    assert resolve_searxng_time_range(_test_req_factory(time_range="month")) == "month"
+    assert resolve_serper_tbs(_test_req_factory(days=7)) == "qdr:d7"
+    assert resolve_search_depth(_test_req_factory(search_depth="advanced")) == "advanced"
 
 
 def test_refactored_scoring_rules():
     ranked = _new_test_item(
         rank=1,
-        title='Lithium dendrite suppression mechanism',
-        description='solid electrolyte interface study',
+        title="Lithium dendrite suppression mechanism",
+        description="solid electrolyte interface study",
         scraped=True,
         content_chars=9000,
-        content='This is about lithium dendrites and solid electrolyte interface.',
-        published='2026-01-01',
+        content="This is about lithium dendrites and solid electrolyte interface.",
+        published="2026-01-01",
     )
     unranked = _new_test_item(
         rank=10,
-        title='Weather forecast',
-        description='daily report',
+        title="Weather forecast",
+        description="daily report",
         scraped=False,
         content_chars=120,
-        content='Not related.',
+        content="Not related.",
         published=None,
     )
-    assert score_item(ranked, 'lithium dendrite solid electrolyte interface') > score_item(
+    assert score_item(ranked, "lithium dendrite solid electrolyte interface") > score_item(
         unranked,
-        'lithium dendrite solid electrolyte interface',
+        "lithium dendrite solid electrolyte interface",
     )
 
 
 def test_buckets_and_chunks_still_work():
     items = [
-        _new_test_item(rank=1, content='a', scraped=True, url='https://a', title='A'),
-        _new_test_item(rank=2, content='b', scraped=True, url='https://b', title='B'),
-        _new_test_item(rank=3, content='', scraped=False, url='https://c', title='C'),
+        _new_test_item(rank=1, content="a", scraped=True, url="https://a", title="A"),
+        _new_test_item(rank=2, content="b", scraped=True, url="https://b", title="B"),
+        _new_test_item(rank=3, content="", scraped=False, url="https://c", title="C"),
     ]
     assert resolve_max_chars_per_source(_test_req_factory(chunks_per_source=2)) == 1000
     buckets = split_result_buckets(items, max_sources=1)
-    assert [item.title for item in buckets['not_summarized']] == ['B']
-    assert [item.title for item in buckets['excluded_results']] == ['C']
+    assert [item.title for item in buckets["not_summarized"]] == ["B"]
+    assert [item.title for item in buckets["excluded_results"]] == ["C"]
 
 
 def test_max_results_falls_back_to_count():

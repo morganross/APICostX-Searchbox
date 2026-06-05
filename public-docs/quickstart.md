@@ -37,11 +37,13 @@ Create `.env` from the example file when available:
 cp .env.example .env
 ```
 
-Minimum web-search example:
+Minimum web-search plus synthesis example:
 
 ```text
 SEARCH_PROVIDER=searxng
 SEARXNG_URL=http://127.0.0.1:8080
+SUMMARIZER_ENABLED=true
+OPENROUTER_API_KEY=your_llm_key
 ```
 
 Paid web provider example:

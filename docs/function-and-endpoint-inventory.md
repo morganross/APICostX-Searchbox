@@ -1,0 +1,175 @@
+# Function and Endpoint Inventory
+
+Generated from live `main.py`.
+
+## API Endpoints
+
+- `GET /health` -> `health` at `main.py:392`
+- `GET /config` -> `config` at `main.py:408`
+- `GET /status` -> `status` at `main.py:506`
+- `GET /health/monitor` -> `health_monitor` at `main.py:517`
+- `GET /logs/llm-attempts` -> `get_llm_attempt_logs` at `main.py:532`
+- `GET /logs/provider-events` -> `get_provider_event_logs` at `main.py:538`
+- `POST /search` -> `search` at `main.py:3512`
+- `GET /search` -> `search_get` at `main.py:3630`
+- `GET /search-raw` -> `search_raw` at `main.py:3663`
+- `POST /search-summary` -> `search_summary` at `main.py:3710`
+
+## Pydantic / Data Classes
+
+- `LLMOptions` at `main.py:206`
+- `ImageItem` at `main.py:226`
+- `SourceEvidence` at `main.py:231`
+- `SearchRequest` at `main.py:240`
+- `SearchItem` at `main.py:283`
+- `SearchResponse` at `main.py:315`
+- `SearchSummaryRequest` at `main.py:332`
+- `SearchSummaryResponse` at `main.py:374`
+- `TavilySearchResult` at `main.py:3493`
+- `TavilySearchResponse` at `main.py:3501`
+
+## Top-Level Functions
+
+- `_load_env_file` at `main.py:49`: general helper or API handler
+- `health` at `main.py:392`: health and logging
+- `config` at `main.py:408`: general helper or API handler
+- `status` at `main.py:506`: health and logging
+- `health_monitor` at `main.py:517`: health and logging
+- `get_llm_attempt_logs` at `main.py:532`: LLM and summarization
+- `get_provider_event_logs` at `main.py:538`: retrieval and provider routing
+- `_auth_key_from_header_or_key` at `main.py:543`: auth and rate limiting
+- `_check_rate_limit` at `main.py:563`: auth and rate limiting
+- `_authorize` at `main.py:575`: auth and rate limiting
+- `_json_safe` at `main.py:579`: general helper or API handler
+- `_append_jsonl` at `main.py:587`: general helper or API handler
+- `_tail_jsonl` at `main.py:599`: general helper or API handler
+- `_log_llm_attempt` at `main.py:614`: LLM and summarization
+- `_log_provider_event` at `main.py:623`: retrieval and provider routing
+- `_summarize_events` at `main.py:631`: LLM and summarization
+- `_shorten` at `main.py:645`: general helper or API handler
+- `_boolish` at `main.py:649`: general helper or API handler
+- `_bounded_int` at `main.py:659`: general helper or API handler
+- `_model_dict` at `main.py:667`: general helper or API handler
+- `_resolve_max_results` at `main.py:671`: general helper or API handler
+- `_resolve_include_content` at `main.py:678`: general helper or API handler
+- `_resolve_include_answer` at `main.py:690`: general helper or API handler
+- `_resolve_debug` at `main.py:699`: general helper or API handler
+- `_resolve_unused_results` at `main.py:704`: general helper or API handler
+- `_split_result_buckets` at `main.py:715`: general helper or API handler
+- `async _normalize_search_query` at `main.py:730`: general helper or API handler
+- `_resolve_country` at `main.py:795`: general helper or API handler
+- `_resolve_brave_safesearch` at `main.py:802`: general helper or API handler
+- `_resolve_searxng_safesearch` at `main.py:806`: general helper or API handler
+- `_resolve_freshness` at `main.py:810`: general helper or API handler
+- `_resolve_searxng_time_range` at `main.py:834`: general helper or API handler
+- `_resolve_serper_tbs` at `main.py:850`: general helper or API handler
+- `_resolve_search_depth` at `main.py:877`: general helper or API handler
+- `_resolve_summarize_top_n` at `main.py:882`: LLM and summarization
+- `_resolve_max_chars_per_source` at `main.py:886`: general helper or API handler
+- `_resolve_timeout` at `main.py:896`: general helper or API handler
+- `_favicon_for_url` at `main.py:900`: general helper or API handler
+- `_chunk_text` at `main.py:907`: general helper or API handler
+- `_score_item` at `main.py:922`: general helper or API handler
+- `_is_private_ip` at `main.py:937`: general helper or API handler
+- `_validate_fetch_url` at `main.py:945`: content extraction
+- `_domain_allowed` at `main.py:960`: general helper or API handler
+- `_forced_int` at `main.py:972`: general helper or API handler
+- `_forced_float` at `main.py:981`: general helper or API handler
+- `_resolve_llm_options` at `main.py:990`: LLM and summarization
+- `_truncate_payload` at `main.py:1049`: general helper or API handler
+- `_html_to_text` at `main.py:1055`: content extraction
+- `_pdf_to_text` at `main.py:1065`: content extraction
+- `_searxng_query_url` at `main.py:1079`: general helper or API handler
+- `_parse_brave_results` at `main.py:1083`: general helper or API handler
+- `_parse_serper_results` at `main.py:1105`: general helper or API handler
+- `_parse_searxng_results` at `main.py:1132`: general helper or API handler
+- `async _search_brave` at `main.py:1154`: general helper or API handler
+- `async _search_serper` at `main.py:1186`: general helper or API handler
+- `async _search_searxng` at `main.py:1221`: general helper or API handler
+- `async _search_provider` at `main.py:1242`: retrieval and provider routing
+- `async _extract_with_playwright` at `main.py:1265`: content extraction
+- `async _extract_content` at `main.py:1325`: content extraction
+- `_clean_arxiv_text` at `main.py:1424`: scientific provider adapter
+- `_compile_arxiv_query` at `main.py:1428`: scientific provider adapter
+- `_advanced_provider_names` at `main.py:1439`: retrieval and provider routing
+- `_advanced_provider_file_paths` at `main.py:1443`: retrieval and provider routing
+- `_read_json_file_locked` at `main.py:1450`: general helper or API handler
+- `_write_json_file_locked` at `main.py:1465`: general helper or API handler
+- `_advanced_provider_base_cooldown_seconds` at `main.py:1487`: retrieval and provider routing
+- `_advanced_provider_cooldown_snapshot` at `main.py:1499`: retrieval and provider routing
+- `_advanced_provider_cooldown_remaining` at `main.py:1518`: retrieval and provider routing
+- `_raise_if_advanced_provider_cooling` at `main.py:1523`: retrieval and provider routing
+- `_mark_advanced_provider_success` at `main.py:1534`: retrieval and provider routing
+- `_mark_advanced_provider_failure` at `main.py:1548`: retrieval and provider routing
+- `_advanced_provider_daily_limits` at `main.py:1577`: retrieval and provider routing
+- `_advanced_provider_quota_day` at `main.py:1587`: retrieval and provider routing
+- `_advanced_provider_quota_paths` at `main.py:1591`: retrieval and provider routing
+- `_advanced_provider_quota_snapshot` at `main.py:1598`: retrieval and provider routing
+- `_reserve_advanced_provider_quota` at `main.py:1618`: retrieval and provider routing
+- `_arxiv_cooldown_remaining_seconds` at `main.py:1664`: scientific provider adapter
+- `_arxiv_parse_retry_after` at `main.py:1668`: scientific provider adapter
+- `_arxiv_mark_refusal` at `main.py:1685`: scientific provider adapter
+- `_arxiv_throttle_exception` at `main.py:1707`: scientific provider adapter
+- `async _arxiv_rate_limited_get` at `main.py:1717`: scientific provider adapter
+- `async _fetch_arxiv_pdf_text` at `main.py:1738`: scientific provider adapter
+- `_arxiv_wants_pdf_text` at `main.py:1778`: scientific provider adapter
+- `async _summarize_paper_content` at `main.py:1782`: LLM and summarization
+- `_parse_arxiv_entries` at `main.py:1818`: scientific provider adapter
+- `_resolve_advanced_source` at `main.py:1872`: general helper or API handler
+- `_agentic_data_headers` at `main.py:1889`: scientific provider adapter
+- `_agentic_text_from_payload` at `main.py:1899`: scientific provider adapter
+- `_agentic_response_text` at `main.py:1928`: scientific provider adapter
+- `async _fetch_agentic_full_text` at `main.py:1945`: scientific provider adapter
+- `async _run_agentic_data_search` at `main.py:1972`: scientific provider adapter
+- `_sciencestack_headers` at `main.py:2075`: scientific provider adapter
+- `_sciencestack_payload_data` at `main.py:2085`: scientific provider adapter
+- `_sciencestack_text_from_payload` at `main.py:2091`: scientific provider adapter
+- `async _fetch_sciencestack_content` at `main.py:2117`: scientific provider adapter
+- `async _run_sciencestack_search` at `main.py:2151`: scientific provider adapter
+- `_oanor_headers` at `main.py:2247`: scientific provider adapter
+- `_oanor_data_rows` at `main.py:2257`: scientific provider adapter
+- `_oanor_first` at `main.py:2272`: scientific provider adapter
+- `_oanor_pdf_url` at `main.py:2290`: scientific provider adapter
+- `_oanor_arxiv_id` at `main.py:2314`: scientific provider adapter
+- `async _run_oanor_search` at `main.py:2324`: scientific provider adapter
+- `_searchapi_auth_params` at `main.py:2422`: scientific provider adapter
+- `_searchapi_author_names` at `main.py:2428`: scientific provider adapter
+- `_searchapi_best_url` at `main.py:2444`: scientific provider adapter
+- `async _run_searchapi_scholar_search` at `main.py:2452`: retrieval and provider routing
+- `_advanced_provider_failure_status` at `main.py:2563`: retrieval and provider routing
+- `_advanced_provider_failure_reason` at `main.py:2575`: retrieval and provider routing
+- `async _call_advanced_provider` at `main.py:2580`: retrieval and provider routing
+- `_advanced_clone_for_provider` at `main.py:2612`: retrieval and provider routing
+- `async _run_advanced_search_auto` at `main.py:2620`: retrieval and provider routing
+- `async _run_advanced_search` at `main.py:2684`: retrieval and provider routing
+- `async _run_arxiv_search` at `main.py:2693`: scientific provider adapter
+- `async _run_search` at `main.py:2764`: retrieval and provider routing
+- `_word_list` at `main.py:2861`: general helper or API handler
+- `_summary_terms` at `main.py:2865`: LLM and summarization
+- `_split_passages` at `main.py:2875`: general helper or API handler
+- `_is_domain_only_text` at `main.py:2886`: general helper or API handler
+- `_passage_score` at `main.py:2892`: general helper or API handler
+- `_select_source_passages` at `main.py:2911`: general helper or API handler
+- `_normalize_for_summarizer` at `main.py:2976`: LLM and summarization
+- `_extract_json_from_text` at `main.py:2997`: content extraction
+- `_litellm_api_key_for_model` at `main.py:3008`: LLM and summarization
+- `_litellm_api_base_for_provider` at `main.py:3029`: retrieval and provider routing
+- `_split_provider_model` at `main.py:3035`: retrieval and provider routing
+- `_build_llm_candidate_specs` at `main.py:3046`: LLM and summarization
+- `_is_expensive_llm_spec` at `main.py:3055`: LLM and summarization
+- `_extract_llm_response_payload` at `main.py:3063`: LLM and summarization
+- `_normalize_summary_payload` at `main.py:3084`: LLM and summarization
+- `_validate_summary_payload` at `main.py:3110`: LLM and summarization
+- `_adjust_summary_confidence` at `main.py:3130`: LLM and summarization
+- `_summary_json_schema` at `main.py:3152`: LLM and summarization
+- `_resolve_response_format` at `main.py:3168`: general helper or API handler
+- `async _call_litellm_model` at `main.py:3185`: LLM and summarization
+- `async _repair_summary_payload` at `main.py:3207`: LLM and summarization
+- `_remaining_llm_timeout` at `main.py:3224`: LLM and summarization
+- `async _run_llm_orchestrator` at `main.py:3230`: LLM and summarization
+- `async _summarize_query` at `main.py:3319`: LLM and summarization
+- `_calculate_searchbox_usage` at `main.py:3456`: general helper or API handler
+- `async search` at `main.py:3512`: general helper or API handler
+- `async search_get` at `main.py:3630`: general helper or API handler
+- `search_raw` at `main.py:3663`: general helper or API handler
+- `async search_summary` at `main.py:3710`: LLM and summarization

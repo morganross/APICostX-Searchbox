@@ -195,6 +195,8 @@ class TavilySearchResult(BaseModel):
     content: str
     raw_content: Optional[str] = None
     score: float
+    searchbox_url: Optional[str] = None
+    aggregate_url: Optional[str] = None
 
 
 class TavilySearchResponse(BaseModel):
