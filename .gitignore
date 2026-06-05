@@ -2,3 +2,15 @@ venv/
 .env
 __pycache__/
 *.pyc
+
+# Runtime state
+data/
+logs/
+*.log
+
+# Local/editor noise
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/

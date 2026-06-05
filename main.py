@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import ipaddress
 import json
 import os
@@ -8,8 +9,11 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urljoin, urlparse
+from pathlib import Path
+from urllib.parse import urlencode, urljoin, urlparse
+import xml.etree.ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup
@@ -43,8 +47,12 @@ except Exception:
     _PDF_AVAILABLE = False
 
 
+BASE_DIR = Path(__file__).resolve().parent
+
+
 def _load_env_file() -> None:
-    env_file = os.environ.get('SEARCH_MVP_ENV_FILE', '/home/ubuntu/acm-oss/search-stack-playground/.env').strip()
+    env_file = os.environ.get('SEARCHBOX_ENV_FILE') or str(BASE_DIR / '.env')
+    env_file = env_file.strip()
     if not env_file or not os.path.exists(env_file):
         return
     with open(env_file, encoding='utf-8') as handle:
@@ -84,6 +92,72 @@ BLOCK_PRIVATE_FETCH_IPS = os.environ.get('BLOCK_PRIVATE_FETCH_IPS', 'true').lowe
 SEARCH_PROVIDER = os.environ.get('SEARCH_PROVIDER', 'serper').strip().lower()
 SEARXNG_URL = os.environ.get('SEARXNG_URL', 'http://127.0.0.1:8091').strip()
 SEARXNG_RESULTS_LIMIT = int(os.environ.get('SEARXNG_RESULTS_LIMIT', '50'))
+
+ADVANCED_SEARCH_ENABLED = os.environ.get('ADVANCED_SEARCH_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+ADVANCED_SEARCH_DEFAULT_SOURCE = os.environ.get('ADVANCED_SEARCH_DEFAULT_SOURCE', 'auto').strip().lower()
+ADVANCED_SEARCH_AUTO_PROVIDER_ORDER = [p.strip().lower().replace('-', '_') for p in os.environ.get('ADVANCED_SEARCH_AUTO_PROVIDER_ORDER', 'sciencestack,searchapi_scholar,serpapi_scholar,agentic_data,arxiv,oanor').split(',') if p.strip()]
+ADVANCED_SEARCH_AUTO_MIN_PROVIDERS = int(os.environ.get('ADVANCED_SEARCH_AUTO_MIN_PROVIDERS', '2'))
+ADVANCED_SEARCH_AUTO_MAX_PROVIDERS = int(os.environ.get('ADVANCED_SEARCH_AUTO_MAX_PROVIDERS', '5'))
+SCIENCE_CLASSIFIER_ENABLED = os.environ.get('SCIENCE_CLASSIFIER_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+SCIENCE_CLASSIFIER_TIMEOUT = float(os.environ.get('SCIENCE_CLASSIFIER_TIMEOUT', '8'))
+SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS = float(os.environ.get('SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS', '15'))
+SCIENCE_CLASSIFIER_MAX_COMPLETION_TOKENS = int(os.environ.get('SCIENCE_CLASSIFIER_MAX_COMPLETION_TOKENS', '128'))
+SCIENCE_CLASSIFIER_CONFIDENCE_THRESHOLD = float(os.environ.get('SCIENCE_CLASSIFIER_CONFIDENCE_THRESHOLD', '0.55'))
+ARXIV_API_URL = os.environ.get('ARXIV_API_URL', 'https://export.arxiv.org/api/query').strip()
+ARXIV_USER_AGENT = os.environ.get('ARXIV_USER_AGENT', 'Searchbox/0.1 (+https://github.com/searchbox/searchbox)').strip()
+ARXIV_TIMEOUT = float(os.environ.get('ARXIV_TIMEOUT', '20'))
+ARXIV_MAX_RESULTS = int(os.environ.get('ARXIV_MAX_RESULTS', '8'))
+ARXIV_PDF_MAX_BYTES = int(os.environ.get('ARXIV_PDF_MAX_BYTES', str(25 * 1024 * 1024)))
+ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS = int(os.environ.get('ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS', '5000'))
+ARXIV_PAPER_SUMMARY_MAX_SOURCE_CHARS = int(os.environ.get('ARXIV_PAPER_SUMMARY_MAX_SOURCE_CHARS', '120000'))
+ARXIV_MIN_INTERVAL_SECONDS = float(os.environ.get('ARXIV_MIN_INTERVAL_SECONDS', '3.2'))
+ARXIV_DAILY_REQUEST_LIMIT = int(os.environ.get('ARXIV_DAILY_REQUEST_LIMIT', '28800'))
+ARXIV_COOLDOWN_SECONDS = float(os.environ.get('ARXIV_COOLDOWN_SECONDS', '300'))
+ARXIV_MAX_RETRY_AFTER_SECONDS = float(os.environ.get('ARXIV_MAX_RETRY_AFTER_SECONDS', '1800'))
+
+AGENTIC_DATA_ARXIV_URL = os.environ.get('AGENTIC_DATA_ARXIV_URL', 'https://data.rag.ac.cn/arxiv/').strip().rstrip('/') + '/'
+AGENTIC_DATA_API_KEY = os.environ.get('AGENTIC_DATA_API_KEY', '').strip()
+AGENTIC_DATA_TIMEOUT = float(os.environ.get('AGENTIC_DATA_TIMEOUT', '30'))
+AGENTIC_DATA_MAX_RESULTS = int(os.environ.get('AGENTIC_DATA_MAX_RESULTS', '8'))
+AGENTIC_DATA_DAILY_REQUEST_LIMIT = int(os.environ.get('AGENTIC_DATA_DAILY_REQUEST_LIMIT', '10000'))
+
+SCIENCESTACK_API_URL = os.environ.get('SCIENCESTACK_API_URL', 'https://sciencestack.ai/api/v1').strip().rstrip('/')
+SCIENCESTACK_API_KEY = os.environ.get('SCIENCESTACK_API_KEY', '').strip()
+SCIENCESTACK_TIMEOUT = float(os.environ.get('SCIENCESTACK_TIMEOUT', '30'))
+SCIENCESTACK_MAX_RESULTS = int(os.environ.get('SCIENCESTACK_MAX_RESULTS', '8'))
+SCIENCESTACK_DAILY_REQUEST_LIMIT = int(os.environ.get('SCIENCESTACK_DAILY_REQUEST_LIMIT', '100'))
+
+OANOR_ARXIV_API_URL = os.environ.get('OANOR_ARXIV_API_URL', 'https://api.oanor.com/arxiv-api').strip().rstrip('/')
+OANOR_API_KEY = os.environ.get('OANOR_API_KEY', '').strip()
+OANOR_TIMEOUT = float(os.environ.get('OANOR_TIMEOUT', '30'))
+OANOR_MAX_RESULTS = int(os.environ.get('OANOR_MAX_RESULTS', '8'))
+OANOR_DAILY_REQUEST_LIMIT = int(os.environ.get('OANOR_DAILY_REQUEST_LIMIT', '3'))
+
+SEARCHAPI_API_URL = os.environ.get('SEARCHAPI_API_URL', 'https://www.searchapi.io/api/v1/search').strip()
+SEARCHAPI_API_KEY = os.environ.get('SEARCHAPI_API_KEY', '').strip()
+SEARCHAPI_TIMEOUT = float(os.environ.get('SEARCHAPI_TIMEOUT', '30'))
+SEARCHAPI_MAX_RESULTS = int(os.environ.get('SEARCHAPI_MAX_RESULTS', '8'))
+SEARCHAPI_DAILY_REQUEST_LIMIT = int(os.environ.get('SEARCHAPI_DAILY_REQUEST_LIMIT', '100'))
+
+SERPAPI_API_URL = os.environ.get('SERPAPI_API_URL', 'https://serpapi.com/search.json').strip()
+SERPAPI_API_KEY = os.environ.get('SERPAPI_API_KEY', '').strip()
+SERPAPI_TIMEOUT = float(os.environ.get('SERPAPI_TIMEOUT', '30'))
+SERPAPI_MAX_RESULTS = int(os.environ.get('SERPAPI_MAX_RESULTS', '8'))
+SERPAPI_DAILY_REQUEST_LIMIT = int(os.environ.get('SERPAPI_DAILY_REQUEST_LIMIT', '250'))
+SERPAPI_MONTHLY_REQUEST_LIMIT = int(os.environ.get('SERPAPI_MONTHLY_REQUEST_LIMIT', '250'))
+
+ADVANCED_PROVIDER_QUOTA_FILE = os.environ.get('ADVANCED_PROVIDER_QUOTA_FILE', str(BASE_DIR / 'data' / 'advanced_provider_daily_usage.json')).strip()
+ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE = os.environ.get('ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE', str(BASE_DIR / 'data' / 'advanced_provider_monthly_usage.json')).strip()
+ADVANCED_PROVIDER_COOLDOWN_FILE = os.environ.get('ADVANCED_PROVIDER_COOLDOWN_FILE', str(BASE_DIR / 'data' / 'advanced_provider_cooldowns.json')).strip()
+ADVANCED_PROVIDER_COOLDOWN_MAX_SECONDS = int(os.environ.get('ADVANCED_PROVIDER_COOLDOWN_MAX_SECONDS', '86400'))
+
+SEARCHBOX_LOG_DIR = os.environ.get('SEARCHBOX_LOG_DIR', str(BASE_DIR / 'logs')).strip()
+LLM_ATTEMPT_LOG_FILE = os.environ.get('LLM_ATTEMPT_LOG_FILE', os.path.join(SEARCHBOX_LOG_DIR, 'llm_attempts.jsonl')).strip()
+PROVIDER_EVENT_LOG_FILE = os.environ.get('PROVIDER_EVENT_LOG_FILE', os.path.join(SEARCHBOX_LOG_DIR, 'provider_events.jsonl')).strip()
+SEARCHBOX_LOG_API_MAX_LINES = int(os.environ.get('SEARCHBOX_LOG_API_MAX_LINES', '1000'))
+SEARCHBOX_WEB_CONTEXT_RESULTS = int(os.environ.get('SEARCHBOX_WEB_CONTEXT_RESULTS', '5'))
+SEARCHBOX_AGGREGATE_CONTENT_MAX_CHARS = int(os.environ.get('SEARCHBOX_AGGREGATE_CONTENT_MAX_CHARS', '50000'))
+SEARCHBOX_AGGREGATE_RAW_CONTENT_MAX_CHARS = int(os.environ.get('SEARCHBOX_AGGREGATE_RAW_CONTENT_MAX_CHARS', '200000'))
 
 ENRICH_USE_PLAYWRIGHT = os.environ.get('ENRICH_USE_PLAYWRIGHT', 'true').lower() in ('1', 'true', 'yes', 'on')
 ENRICH_PLAYWRIGHT_TIMEOUT_MS = int(os.environ.get('ENRICH_PLAYWRIGHT_TIMEOUT_MS', '15000'))
@@ -133,6 +207,10 @@ LLM_PROVIDER_KEY = os.environ.get('LLM_PROVIDER_KEY', '').strip() or None
 
 
 _RATE_BUCKETS: Dict[str, deque] = defaultdict(deque)
+_ARXIV_REQUEST_LOCK = asyncio.Lock()
+_ARXIV_LAST_REQUEST_AT = 0.0
+_ARXIV_COOLDOWN_UNTIL = 0.0
+_ARXIV_LAST_REFUSAL: Optional[Dict[str, Any]] = None
 _STATUS = {
     'started_at': datetime.utcnow().isoformat() + 'Z',
     'requests_total': 0,
@@ -359,6 +437,54 @@ def config() -> Dict[str, Any]:
             'searxng_results_limit': SEARXNG_RESULTS_LIMIT,
             'request_timeout': REQUEST_TIMEOUT,
         },
+        'advanced_search': {
+            'enabled': ADVANCED_SEARCH_ENABLED,
+            'default_source': ADVANCED_SEARCH_DEFAULT_SOURCE,
+            'auto_provider_order': ADVANCED_SEARCH_AUTO_PROVIDER_ORDER,
+            'auto_min_providers': ADVANCED_SEARCH_AUTO_MIN_PROVIDERS,
+            'auto_max_providers': ADVANCED_SEARCH_AUTO_MAX_PROVIDERS,
+            'science_classifier_enabled': SCIENCE_CLASSIFIER_ENABLED,
+            'science_classifier_timeout': SCIENCE_CLASSIFIER_TIMEOUT,
+            'science_classifier_max_total_seconds': SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS,
+            'science_classifier_max_completion_tokens': SCIENCE_CLASSIFIER_MAX_COMPLETION_TOKENS,
+            'science_classifier_confidence_threshold': SCIENCE_CLASSIFIER_CONFIDENCE_THRESHOLD,
+            'sources': ['auto', 'arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar'],
+            'arxiv_timeout': ARXIV_TIMEOUT,
+            'arxiv_max_results': ARXIV_MAX_RESULTS,
+            'arxiv_pdf_max_bytes': ARXIV_PDF_MAX_BYTES,
+            'arxiv_content_summary_threshold_chars': ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS,
+            'arxiv_paper_summary_max_source_chars': ARXIV_PAPER_SUMMARY_MAX_SOURCE_CHARS,
+            'arxiv_min_interval_seconds': ARXIV_MIN_INTERVAL_SECONDS,
+            'arxiv_daily_request_limit': ARXIV_DAILY_REQUEST_LIMIT,
+            'arxiv_cooldown_seconds': ARXIV_COOLDOWN_SECONDS,
+            'arxiv_max_retry_after_seconds': ARXIV_MAX_RETRY_AFTER_SECONDS,
+            'arxiv_cooldown_remaining_seconds': _arxiv_cooldown_remaining_seconds(),
+            'arxiv_last_refusal': _ARXIV_LAST_REFUSAL,
+            'agentic_data_configured': bool(AGENTIC_DATA_API_KEY),
+            'agentic_data_timeout': AGENTIC_DATA_TIMEOUT,
+            'agentic_data_max_results': AGENTIC_DATA_MAX_RESULTS,
+            'agentic_data_daily_request_limit': AGENTIC_DATA_DAILY_REQUEST_LIMIT,
+            'sciencestack_configured': bool(SCIENCESTACK_API_KEY),
+            'sciencestack_timeout': SCIENCESTACK_TIMEOUT,
+            'sciencestack_max_results': SCIENCESTACK_MAX_RESULTS,
+            'sciencestack_daily_request_limit': SCIENCESTACK_DAILY_REQUEST_LIMIT,
+            'oanor_configured': bool(OANOR_API_KEY),
+            'oanor_timeout': OANOR_TIMEOUT,
+            'oanor_max_results': OANOR_MAX_RESULTS,
+            'oanor_daily_request_limit': OANOR_DAILY_REQUEST_LIMIT,
+            'searchapi_configured': bool(SEARCHAPI_API_KEY),
+            'searchapi_timeout': SEARCHAPI_TIMEOUT,
+            'searchapi_max_results': SEARCHAPI_MAX_RESULTS,
+            'searchapi_daily_request_limit': SEARCHAPI_DAILY_REQUEST_LIMIT,
+            'serpapi_configured': bool(SERPAPI_API_KEY),
+            'serpapi_timeout': SERPAPI_TIMEOUT,
+            'serpapi_max_results': SERPAPI_MAX_RESULTS,
+            'serpapi_daily_request_limit': SERPAPI_DAILY_REQUEST_LIMIT,
+            'serpapi_monthly_request_limit': SERPAPI_MONTHLY_REQUEST_LIMIT,
+            'provider_daily_usage': _advanced_provider_quota_snapshot(),
+            'provider_monthly_usage': _advanced_provider_monthly_quota_snapshot(),
+            'provider_cooldowns': _advanced_provider_cooldown_snapshot(),
+        },
         'enrichment': {
             'playwright_enabled': ENRICH_USE_PLAYWRIGHT,
             'playwright_available': _PLAYWRIGHT_AVAILABLE,
@@ -410,7 +536,41 @@ def config() -> Dict[str, Any]:
 
 @app.get('/status')
 def status() -> Dict[str, Any]:
-    return dict(_STATUS)
+    payload = dict(_STATUS)
+    payload['logs'] = {
+        'llm_attempt_log_file': LLM_ATTEMPT_LOG_FILE,
+        'provider_event_log_file': PROVIDER_EVENT_LOG_FILE,
+        'api_max_lines': SEARCHBOX_LOG_API_MAX_LINES,
+    }
+    return payload
+
+
+@app.get('/health/monitor')
+def health_monitor(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _authorize(authorization)
+    llm_events = _tail_jsonl(LLM_ATTEMPT_LOG_FILE, 500)
+    provider_events = _tail_jsonl(PROVIDER_EVENT_LOG_FILE, 500)
+    return {
+        'status': 'ok',
+        'runtime': dict(_STATUS),
+        'advanced_provider_daily_usage': _advanced_provider_quota_snapshot(),
+        'advanced_provider_monthly_usage': _advanced_provider_monthly_quota_snapshot(),
+        'advanced_provider_cooldowns': _advanced_provider_cooldown_snapshot(),
+        'llm_attempts_recent': _summarize_events(llm_events, ['purpose', 'provider', 'model']),
+        'provider_events_recent': _summarize_events(provider_events, ['provider', 'event']),
+    }
+
+
+@app.get('/logs/llm-attempts')
+def get_llm_attempt_logs(limit: int = 100, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _authorize(authorization)
+    return {'log': 'llm_attempts', 'count': min(max(int(limit or 100), 1), SEARCHBOX_LOG_API_MAX_LINES), 'events': _tail_jsonl(LLM_ATTEMPT_LOG_FILE, limit)}
+
+
+@app.get('/logs/provider-events')
+def get_provider_event_logs(limit: int = 100, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _authorize(authorization)
+    return {'log': 'provider_events', 'count': min(max(int(limit or 100), 1), SEARCHBOX_LOG_API_MAX_LINES), 'events': _tail_jsonl(PROVIDER_EVENT_LOG_FILE, limit)}
 
 
 def _auth_key_from_header_or_key(authorization: Optional[str], api_key: Optional[str] = None) -> str:
@@ -447,6 +607,72 @@ def _check_rate_limit(bucket_key: str) -> None:
 
 def _authorize(authorization: Optional[str], api_key: Optional[str] = None) -> None:
     _check_rate_limit(_auth_key_from_header_or_key(authorization, api_key))
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        return str(value)
+
+
+def _append_jsonl(path: str, event: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        payload = {k: _json_safe(v) for k, v in event.items() if v is not None}
+        with open(path, 'a', encoding='utf-8') as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.write(json.dumps(payload, sort_keys=True) + '\n')
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception as exc:
+        _STATUS['last_error'] = f'log_write:{type(exc).__name__}: {exc}'
+
+
+def _tail_jsonl(path: str, limit: int) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit or 100), SEARCHBOX_LOG_API_MAX_LINES))
+    if not os.path.exists(path):
+        return []
+    with open(path, 'r', encoding='utf-8') as fh:
+        rows = deque(fh, maxlen=limit)
+    parsed = []
+    for row in rows:
+        try:
+            parsed.append(json.loads(row))
+        except Exception:
+            parsed.append({'malformed': row.strip()})
+    return parsed
+
+
+def _log_llm_attempt(event: Dict[str, Any]) -> None:
+    event = dict(event or {})
+    event.setdefault('timestamp', datetime.utcnow().isoformat() + 'Z')
+    event.setdefault('event_type', 'llm_attempt')
+    for forbidden in ('prompt', 'messages', 'raw', 'raw_model_output', 'api_key'):
+        event.pop(forbidden, None)
+    _append_jsonl(LLM_ATTEMPT_LOG_FILE, event)
+
+
+def _log_provider_event(event: Dict[str, Any]) -> None:
+    event = dict(event or {})
+    event.setdefault('timestamp', datetime.utcnow().isoformat() + 'Z')
+    event.setdefault('event_type', 'provider_event')
+    event.pop('api_key', None)
+    _append_jsonl(PROVIDER_EVENT_LOG_FILE, event)
+
+
+def _summarize_events(events: List[Dict[str, Any]], group_fields: List[str]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {'total': len(events), 'groups': {}}
+    for event in events:
+        key = '|'.join(str(event.get(field) or 'unknown') for field in group_fields)
+        group = summary['groups'].setdefault(key, {'total': 0, 'success': 0, 'failure': 0, 'last_event': None})
+        group['total'] += 1
+        if event.get('success') is True:
+            group['success'] += 1
+        elif event.get('success') is False:
+            group['failure'] += 1
+        group['last_event'] = event.get('timestamp')
+    return summary
 
 
 def _shorten(text: str, max_chars: int) -> str:
@@ -876,7 +1102,7 @@ def _pdf_to_text(data: bytes) -> str:
         import io
         reader = PdfReader(io.BytesIO(data))
         parts = []
-        for page in reader.pages[:10]:
+        for page in reader.pages:
             parts.append(page.extract_text() or '')
         return re.sub(r'\s+', ' ', ' '.join(parts)).strip()
     except Exception:
@@ -1209,6 +1435,1733 @@ async def _extract_content(url: str, timeout_s: float) -> Dict[str, Any]:
         'failure_reason': None if text else (fetch_error or method or 'no_content_extracted'),
         'canonical_url': canonical_url,
     }
+
+
+_ARXIV_STOPWORDS = {
+    'about', 'above', 'after', 'again', 'against', 'also', 'analysis', 'and', 'any', 'are',
+    'article', 'based', 'because', 'been', 'before', 'being', 'between', 'both', 'can',
+    'could', 'deep', 'describe', 'does', 'doing', 'during', 'each', 'effect', 'effects',
+    'find', 'from', 'give', 'have', 'into', 'latest', 'like', 'make', 'many', 'model',
+    'models', 'more', 'most', 'new', 'paper', 'papers', 'please', 'recent', 'report',
+    'research', 'review', 'search', 'show', 'study', 'studies', 'such', 'than', 'that',
+    'the', 'their', 'them', 'then', 'there', 'these', 'they', 'this', 'through', 'using',
+    'what', 'when', 'where', 'which', 'while', 'with', 'without', 'write', 'your'
+}
+_ARXIV_ATOM_NS = {
+    'atom': 'http://www.w3.org/2005/Atom',
+    'arxiv': 'http://arxiv.org/schemas/atom',
+    'opensearch': 'http://a9.com/-/spec/opensearch/1.1/',
+}
+
+
+def _clean_arxiv_text(value: Optional[str]) -> str:
+    return re.sub(r'\s+', ' ', value or '').strip()
+
+
+def _compile_arxiv_query(query: str) -> str:
+    compiled = re.sub(r'\s+', ' ', query or '').strip()
+    if not compiled:
+        raise HTTPException(status_code=400, detail='advanced arXiv search query is empty')
+    return compiled
+
+
+
+
+
+
+def _advanced_provider_names() -> List[str]:
+    return ['arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar']
+
+
+def _advanced_provider_file_paths(path_value: str) -> tuple[str, str]:
+    data_file = path_value
+    data_dir = os.path.dirname(data_file) or '.'
+    os.makedirs(data_dir, exist_ok=True)
+    return data_file, data_file + '.lock'
+
+
+def _read_json_file_locked(path_value: str) -> Dict[str, Any]:
+    data_file, lock_file = _advanced_provider_file_paths(path_value)
+    with open(lock_file, 'a+', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+        try:
+            try:
+                with open(data_file, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+            return data if isinstance(data, dict) else {}
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _write_json_file_locked(path_value: str, mutator) -> Dict[str, Any]:
+    data_file, lock_file = _advanced_provider_file_paths(path_value)
+    with open(lock_file, 'a+', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                with open(data_file, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            result = mutator(data)
+            tmp_file = data_file + '.tmp'
+            with open(tmp_file, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh, sort_keys=True)
+            os.replace(tmp_file, data_file)
+            return result if isinstance(result, dict) else {}
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _advanced_provider_base_cooldown_seconds(provider: str, status_code: int) -> int:
+    if status_code == 402:
+        return 86400
+    if status_code == 429:
+        return 900 if provider != 'arxiv' else int(ARXIV_COOLDOWN_SECONDS)
+    if status_code == 503:
+        return 900
+    if status_code in (502, 504):
+        return 300
+    return 120
+
+
+def _advanced_provider_cooldown_snapshot() -> Dict[str, Any]:
+    now = time.time()
+    data = _read_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE)
+    snapshot = {}
+    for provider in _advanced_provider_names():
+        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
+        until = float(entry.get('cooldown_until_epoch') or 0)
+        remaining = max(0, int(round(until - now)))
+        snapshot[provider] = {
+            'cooling_down': remaining > 0,
+            'retry_after_seconds': remaining,
+            'failure_count': int(entry.get('failure_count') or 0),
+            'last_status_code': entry.get('last_status_code'),
+            'last_reason': entry.get('last_reason'),
+            'last_failure_at': entry.get('last_failure_at'),
+        }
+    return snapshot
+
+
+def _advanced_provider_cooldown_remaining(provider: str) -> int:
+    entry = _advanced_provider_cooldown_snapshot().get(provider) or {}
+    return int(entry.get('retry_after_seconds') or 0)
+
+
+def _raise_if_advanced_provider_cooling(provider: str) -> None:
+    remaining = _advanced_provider_cooldown_remaining(provider)
+    if remaining > 0:
+        raise HTTPException(status_code=429, detail={
+            'source': provider,
+            'reason': 'advanced_provider_cooldown_active',
+            'message': f'{provider} is cooling down locally after a recent provider failure.',
+            'retry_after_seconds': remaining,
+        }, headers={'Retry-After': str(remaining)})
+
+
+def _mark_advanced_provider_success(provider: str) -> None:
+    _log_provider_event({'event': 'success', 'provider': provider, 'success': True})
+    def mutate(data: Dict[str, Any]) -> Dict[str, Any]:
+        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
+        entry.update({
+            'cooldown_until_epoch': 0,
+            'failure_count': 0,
+            'last_success_at': datetime.utcnow().isoformat() + 'Z',
+        })
+        data[provider] = entry
+        return entry
+    _write_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE, mutate)
+
+
+def _mark_advanced_provider_failure(provider: str, status_code: int, reason: str, retry_after: Optional[int] = None) -> int:
+    now = time.time()
+    def mutate(data: Dict[str, Any]) -> Dict[str, Any]:
+        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
+        failure_count = int(entry.get('failure_count') or 0) + 1
+        base = int(retry_after) if retry_after is not None else _advanced_provider_base_cooldown_seconds(provider, status_code)
+        cooldown = min(ADVANCED_PROVIDER_COOLDOWN_MAX_SECONDS, max(30, base * (2 ** max(0, failure_count - 1))))
+        entry.update({
+            'cooldown_until_epoch': now + cooldown,
+            'failure_count': failure_count,
+            'last_status_code': status_code,
+            'last_reason': reason,
+            'last_failure_at': datetime.utcnow().isoformat() + 'Z',
+        })
+        data[provider] = entry
+        return {'retry_after_seconds': int(cooldown), 'failure_count': failure_count}
+    result = _write_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE, mutate)
+    retry_seconds = int(result.get('retry_after_seconds') or _advanced_provider_base_cooldown_seconds(provider, status_code))
+    _log_provider_event({
+        'event': 'failure',
+        'provider': provider,
+        'success': False,
+        'status_code': status_code,
+        'reason': reason,
+        'retry_after_seconds': retry_seconds,
+        'failure_count': result.get('failure_count'),
+    })
+    return retry_seconds
+
+def _advanced_provider_daily_limits() -> Dict[str, int]:
+    return {
+        'arxiv': ARXIV_DAILY_REQUEST_LIMIT,
+        'agentic_data': AGENTIC_DATA_DAILY_REQUEST_LIMIT,
+        'sciencestack': SCIENCESTACK_DAILY_REQUEST_LIMIT,
+        'oanor': OANOR_DAILY_REQUEST_LIMIT,
+        'searchapi_scholar': SEARCHAPI_DAILY_REQUEST_LIMIT,
+        'serpapi_scholar': SERPAPI_DAILY_REQUEST_LIMIT,
+    }
+
+
+def _advanced_provider_quota_day() -> str:
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def _advanced_provider_monthly_limits() -> Dict[str, int]:
+    return {
+        'serpapi_scholar': SERPAPI_MONTHLY_REQUEST_LIMIT,
+    }
+
+
+def _advanced_provider_quota_month() -> str:
+    return datetime.utcnow().strftime('%Y-%m')
+
+
+def _advanced_provider_monthly_quota_paths() -> tuple[str, str]:
+    quota_file = ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE
+    quota_dir = os.path.dirname(quota_file) or '.'
+    os.makedirs(quota_dir, exist_ok=True)
+    return quota_file, quota_file + '.lock'
+
+
+def _advanced_provider_monthly_quota_snapshot() -> Dict[str, Any]:
+    quota_file, _ = _advanced_provider_monthly_quota_paths()
+    month = _advanced_provider_quota_month()
+    limits = _advanced_provider_monthly_limits()
+    try:
+        with open(quota_file, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+    counts = data.get(month) if isinstance(data.get(month), dict) else {}
+    return {
+        provider: {
+            'used': int(counts.get(provider, 0) or 0),
+            'limit': int(limit),
+            'remaining': max(0, int(limit) - int(counts.get(provider, 0) or 0)),
+        }
+        for provider, limit in limits.items()
+    }
+
+
+def _reserve_advanced_provider_monthly_quota(provider: str, units: int = 1) -> None:
+    units = max(1, int(units or 1))
+    limits = _advanced_provider_monthly_limits()
+    if provider not in limits:
+        return
+    limit = int(limits.get(provider, 0) or 0)
+    if limit <= 0:
+        raise HTTPException(status_code=429, detail={
+            'source': provider,
+            'reason': 'advanced_provider_disabled_by_monthly_limit',
+            'message': f'{provider} monthly request limit is disabled or set to zero.',
+            'monthly_limit': limit,
+            'used_this_month': 0,
+            'requested_units': units,
+        })
+    quota_file, lock_file = _advanced_provider_monthly_quota_paths()
+    month = _advanced_provider_quota_month()
+    now = datetime.utcnow()
+    next_month = datetime(now.year + (1 if now.month == 12 else 0), 1 if now.month == 12 else now.month + 1, 1)
+    retry_after = max(1, int((next_month - now).total_seconds()))
+    with open(lock_file, 'a+', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                with open(quota_file, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data = {month: data.get(month, {}) if isinstance(data.get(month), dict) else {}}
+            used = int(data[month].get(provider, 0) or 0)
+            if used + units > limit:
+                raise HTTPException(status_code=429, detail={
+                    'source': provider,
+                    'reason': 'advanced_provider_monthly_limit_reached',
+                    'message': f'{provider} monthly provider limit reached inside Searchbox.',
+                    'monthly_limit': limit,
+                    'used_this_month': used,
+                    'requested_units': units,
+                    'retry_after_seconds': retry_after,
+                }, headers={'Retry-After': str(retry_after)})
+            data[month][provider] = used + units
+            tmp_file = quota_file + '.tmp'
+            with open(tmp_file, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh, sort_keys=True)
+            os.replace(tmp_file, quota_file)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _advanced_provider_quota_paths() -> tuple[str, str]:
+    quota_file = ADVANCED_PROVIDER_QUOTA_FILE
+    quota_dir = os.path.dirname(quota_file) or '.'
+    os.makedirs(quota_dir, exist_ok=True)
+    return quota_file, quota_file + '.lock'
+
+
+def _advanced_provider_quota_snapshot() -> Dict[str, Any]:
+    quota_file, _ = _advanced_provider_quota_paths()
+    day = _advanced_provider_quota_day()
+    limits = _advanced_provider_daily_limits()
+    try:
+        with open(quota_file, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+    counts = data.get(day) if isinstance(data.get(day), dict) else {}
+    return {
+        provider: {
+            'used': int(counts.get(provider, 0) or 0),
+            'limit': int(limit),
+            'remaining': max(0, int(limit) - int(counts.get(provider, 0) or 0)),
+        }
+        for provider, limit in limits.items()
+    }
+
+
+def _reserve_advanced_provider_quota(provider: str, units: int = 1) -> None:
+    units = max(1, int(units or 1))
+    _reserve_advanced_provider_monthly_quota(provider, units)
+    limits = _advanced_provider_daily_limits()
+    limit = int(limits.get(provider, 0) or 0)
+    if limit <= 0:
+        raise HTTPException(status_code=429, detail={
+            'source': provider,
+            'reason': 'advanced_provider_disabled_by_daily_limit',
+            'message': f'{provider} daily request limit is disabled or set to zero.',
+            'daily_limit': limit,
+            'used_today': 0,
+            'requested_units': units,
+        })
+    quota_file, lock_file = _advanced_provider_quota_paths()
+    day = _advanced_provider_quota_day()
+    with open(lock_file, 'a+', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                with open(quota_file, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data = {day: data.get(day, {}) if isinstance(data.get(day), dict) else {}}
+            used = int(data[day].get(provider, 0) or 0)
+            if used + units > limit:
+                retry_after = 86400 - (datetime.utcnow().hour * 3600 + datetime.utcnow().minute * 60 + datetime.utcnow().second)
+                raise HTTPException(status_code=429, detail={
+                    'source': provider,
+                    'reason': 'advanced_provider_daily_limit_reached',
+                    'message': f'{provider} daily free/provider limit reached inside Searchbox.',
+                    'daily_limit': limit,
+                    'used_today': used,
+                    'requested_units': units,
+                    'retry_after_seconds': retry_after,
+                }, headers={'Retry-After': str(retry_after)})
+            data[day][provider] = used + units
+            tmp_file = quota_file + '.tmp'
+            with open(tmp_file, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh, sort_keys=True)
+            os.replace(tmp_file, quota_file)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+def _arxiv_cooldown_remaining_seconds() -> int:
+    return max(0, int(round(_ARXIV_COOLDOWN_UNTIL - time.monotonic())))
+
+
+def _arxiv_parse_retry_after(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    raw = value.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(raw)
+        if retry_at.tzinfo is None:
+            return None
+        return max(0.0, retry_at.timestamp() - time.time())
+    except Exception:
+        return None
+
+
+def _arxiv_mark_refusal(status_code: int, response: Optional[httpx.Response] = None, *, reason: str = 'upstream_refused_request') -> int:
+    global _ARXIV_COOLDOWN_UNTIL, _ARXIV_LAST_REFUSAL
+    retry_after = _arxiv_parse_retry_after(response.headers.get('retry-after') if response is not None else None)
+    cooldown = retry_after if retry_after is not None else ARXIV_COOLDOWN_SECONDS
+    cooldown = max(ARXIV_MIN_INTERVAL_SECONDS, min(float(cooldown), ARXIV_MAX_RETRY_AFTER_SECONDS))
+    _ARXIV_COOLDOWN_UNTIL = max(_ARXIV_COOLDOWN_UNTIL, time.monotonic() + cooldown)
+    retry_seconds = _arxiv_cooldown_remaining_seconds()
+    _ARXIV_LAST_REFUSAL = {
+        'status_code': status_code,
+        'reason': reason,
+        'retry_after_seconds': retry_seconds,
+        'received_at': datetime.utcnow().isoformat() + 'Z',
+    }
+    _STATUS['last_error'] = {
+        'provider': 'advanced:arxiv',
+        'status_code': status_code,
+        'reason': reason,
+        'retry_after_seconds': retry_seconds,
+    }
+    return retry_seconds
+
+
+def _arxiv_throttle_exception(status_code: int, retry_after_seconds: int, *, reason: str) -> HTTPException:
+    detail = {
+        'source': 'arxiv',
+        'reason': reason,
+        'message': 'arXiv did not accept this request right now; Searchbox is cooling down locally before trying arXiv again.',
+        'retry_after_seconds': retry_after_seconds,
+    }
+    return HTTPException(status_code=status_code, detail=detail, headers={'Retry-After': str(retry_after_seconds)})
+
+
+async def _arxiv_rate_limited_get(client: httpx.AsyncClient, url: str, *, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> httpx.Response:
+    global _ARXIV_LAST_REQUEST_AT
+    async with _ARXIV_REQUEST_LOCK:
+        cooldown_remaining = _arxiv_cooldown_remaining_seconds()
+        if cooldown_remaining > 0:
+            raise _arxiv_throttle_exception(429, cooldown_remaining, reason='local_arxiv_cooldown_active')
+        now = time.monotonic()
+        wait_seconds = max(0.0, (_ARXIV_LAST_REQUEST_AT + ARXIV_MIN_INTERVAL_SECONDS) - now)
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+        _reserve_advanced_provider_quota('arxiv')
+        try:
+            response = await client.get(url, params=params, headers=headers)
+        finally:
+            _ARXIV_LAST_REQUEST_AT = time.monotonic()
+        if response.status_code in (429, 503):
+            retry_seconds = _arxiv_mark_refusal(response.status_code, response, reason='upstream_arxiv_refused_request')
+            raise _arxiv_throttle_exception(response.status_code, retry_seconds, reason='upstream_arxiv_refused_request')
+        return response
+
+
+async def _fetch_arxiv_pdf_text(pdf_url: str, *, timeout: float) -> Dict[str, Any]:
+    if not pdf_url:
+        return {'content': '', 'error': 'missing_pdf_url'}
+    _validate_fetch_url(pdf_url)
+    headers = {'User-Agent': ARXIV_USER_AGENT or USER_AGENT, 'Accept': 'application/pdf'}
+    t0 = datetime.now()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await _arxiv_rate_limited_get(client, pdf_url, headers=headers)
+        status = resp.status_code
+        content_type = resp.headers.get('content-type')
+        resp.raise_for_status()
+        body = resp.content
+        if len(body) > ARXIV_PDF_MAX_BYTES:
+            return {
+                'content': '',
+                'error': f'pdf_too_large:{len(body)}',
+                'http_status': status,
+                'content_type': content_type,
+                'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+                'canonical_url': str(resp.url),
+            }
+        text = _pdf_to_text(body)
+        return {
+            'content': text,
+            'error': None if text else 'pdf_text_empty',
+            'http_status': status,
+            'content_type': content_type,
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+            'canonical_url': str(resp.url),
+            'bytes': len(body),
+        }
+    except Exception as exc:
+        return {
+            'content': '',
+            'error': f'{type(exc).__name__}: {exc}',
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+        }
+
+
+def _arxiv_wants_pdf_text(req: SearchRequest) -> bool:
+    return True
+
+
+async def _summarize_paper_content(query: str, item: SearchItem, paper_text: str, llm_options: Optional[LLMOptions] = None) -> str:
+    if not SUMMARIZER_ENABLED:
+        raise HTTPException(status_code=503, detail='paper text exceeded content limit and the summarizer is disabled')
+    if not _LITELLM_AVAILABLE:
+        raise HTTPException(status_code=503, detail='paper text exceeded content limit and litellm is not installed')
+    source_text = _truncate_payload(paper_text, ARXIV_PAPER_SUMMARY_MAX_SOURCE_CHARS)
+    resolved_llm = _resolve_llm_options(llm_options)
+    resolved_llm['system_prompt'] = (
+        'You summarize scientific papers from extracted PDF text. Use only the provided paper text. '
+        'Do not invent claims. Return only one strict JSON object.'
+    )
+    messages = [
+        {'role': 'system', 'content': resolved_llm['system_prompt']},
+        {'role': 'user', 'content': (
+            f'Original search query: {query}\n'
+            f'Paper title: {item.title}\n'
+            f'Paper URL: {item.url}\n\n'
+            'Summarize the paper as a useful research-result content field. Include the problem, method, key findings, '
+            'limitations or caveats when present, and why it matches the query. Return ONLY JSON with fields found, answer, '
+            'highlights, open_questions, confidence, schema_version.\n\n'
+            f'Extracted PDF text:\n{source_text}'
+        )},
+    ]
+    llm_result = await _run_llm_orchestrator(messages, resolved_llm, [item], purpose='paper_summary')
+    parsed = _adjust_summary_confidence(llm_result['parsed'], llm_result.get('attempts') or [], [item], bool(llm_result.get('repaired')))
+    if llm_result.get('ok'):
+        _STATUS['llm_success_total'] += 1
+    else:
+        _STATUS['llm_error_total'] += 1
+        _STATUS['last_error'] = 'arxiv_paper_summary:validation_failed'
+    answer = (parsed.get('answer') or '').strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail='paper summary LLM returned no answer')
+    return _truncate_payload(answer, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+
+
+def _parse_arxiv_entries(payload: bytes, *, query: str, compiled_query: str, count: int) -> List[SearchItem]:
+    root = ET.fromstring(payload)
+    items: List[SearchItem] = []
+    for idx, entry in enumerate(root.findall('atom:entry', _ARXIV_ATOM_NS), start=1):
+        if len(items) >= count:
+            break
+        entry_id = _clean_arxiv_text(entry.findtext('atom:id', default='', namespaces=_ARXIV_ATOM_NS))
+        title = _clean_arxiv_text(entry.findtext('atom:title', default='', namespaces=_ARXIV_ATOM_NS))
+        summary = _clean_arxiv_text(entry.findtext('atom:summary', default='', namespaces=_ARXIV_ATOM_NS))
+        published = _clean_arxiv_text(entry.findtext('atom:published', default='', namespaces=_ARXIV_ATOM_NS)) or None
+        pdf_url = ''
+        for link in entry.findall('atom:link', _ARXIV_ATOM_NS):
+            attrs = getattr(link, 'attrib', {}) or {}
+            if attrs.get('title') == 'pdf' and attrs.get('href'):
+                pdf_url = attrs.get('href') or ''
+                break
+        url = entry_id or pdf_url
+        if not url:
+            continue
+        content = summary[:3000]
+        items.append(SearchItem(
+            rank=idx,
+            title=title or url,
+            url=url,
+            description=summary[:3000],
+            published=published,
+            language='en',
+            score=None,
+            source='arxiv',
+            engine='arxiv_export_api',
+            scraped=True,
+            content_chars=len(summary),
+            fetch_ms=None,
+            content=content,
+            raw_content=summary,
+            extracted_content=summary,
+            usable_for_summary=bool(summary),
+            summary_input_mode='arxiv_abstract',
+            quality_flags=['advanced_search', 'scientific_source', f'compiled_query:{compiled_query}', f'pdf_url:{pdf_url}'],
+            extract_method='arxiv_atom',
+            fetch_status='ok',
+            http_status=200,
+            content_type='application/atom+xml',
+            canonical_url=url,
+            provider_rank=idx,
+        ))
+    for item in items:
+        item.score = _score_item(item, query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+
+
+
+def _resolve_advanced_source(req: SearchRequest) -> str:
+    source = (getattr(req, 'topic', None) or ADVANCED_SEARCH_DEFAULT_SOURCE or 'arxiv').strip().lower().replace('-', '_')
+    if source in ('', 'auto', 'advanced', 'advanced_search', 'general', 'science', 'scientific', 'academic', 'paper', 'papers'):
+        return 'auto'
+    if source in ('arxiv', 'arxiv_api', 'arxiv_export'):
+        return 'arxiv'
+    if source in ('rag', 'rag_ac_cn', 'agentic', 'agentic_data', 'deepxiv', 'agentic_data_interface'):
+        return 'agentic_data'
+    if source in ('sciencestack', 'science_stack', 'science-stack'):
+        return 'sciencestack'
+    if source in ('oanor', 'oanor_arxiv', 'oanor-api', 'oanor_api'):
+        return 'oanor'
+    if source in ('searchapi', 'searchapi_scholar', 'searchapi_google_scholar'):
+        return 'searchapi_scholar'
+    if source in ('serpapi', 'serpapi_scholar', 'serpapi_google_scholar'):
+        return 'serpapi_scholar'
+    if source in ('google_scholar', 'scholar'):
+        return 'searchapi_scholar'
+    return source
+
+
+def _agentic_data_headers() -> Dict[str, str]:
+    if not AGENTIC_DATA_API_KEY:
+        raise HTTPException(status_code=503, detail='agentic_data advanced_search is not configured')
+    return {
+        'Accept': 'application/json, text/markdown;q=0.9, text/plain;q=0.8, */*;q=0.5',
+        'Authorization': f'Bearer {AGENTIC_DATA_API_KEY}',
+        'User-Agent': USER_AGENT,
+    }
+
+
+def _agentic_text_from_payload(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_agentic_text_from_payload(v) for v in value]
+        return '\n\n'.join([p for p in parts if p]).strip()
+    if isinstance(value, dict):
+        for key in ('content', 'raw', 'markdown', 'text', 'paper', 'body', 'preview'):
+            text = _agentic_text_from_payload(value.get(key))
+            if text:
+                return text
+        if 'sections' in value:
+            return _agentic_text_from_payload(value.get('sections'))
+        if 'section_contents' in value:
+            return _agentic_text_from_payload(value.get('section_contents'))
+        parts = []
+        title = value.get('section_name') or value.get('title')
+        if title:
+            parts.append(str(title))
+        for key in ('paragraphs', 'contents', 'children'):
+            text = _agentic_text_from_payload(value.get(key))
+            if text:
+                parts.append(text)
+        return '\n\n'.join(parts).strip()
+    return str(value).strip()
+
+
+def _agentic_response_text(resp: httpx.Response) -> str:
+    content_type = (resp.headers.get('content-type') or '').lower()
+    if 'json' in content_type:
+        try:
+            return _agentic_text_from_payload(resp.json())
+        except Exception:
+            return resp.text.strip()
+    try:
+        parsed = resp.json()
+        text = _agentic_text_from_payload(parsed)
+        if text:
+            return text
+    except Exception:
+        pass
+    return resp.text.strip()
+
+
+async def _fetch_agentic_full_text(client: httpx.AsyncClient, arxiv_id: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    if not arxiv_id:
+        return {'content': '', 'error': 'missing_arxiv_id'}
+    t0 = datetime.now()
+    try:
+        _reserve_advanced_provider_quota('agentic_data')
+        resp = await client.get(AGENTIC_DATA_ARXIV_URL, params={'type': 'raw', 'arxiv_id': arxiv_id}, headers=headers)
+        status = resp.status_code
+        content_type = resp.headers.get('content-type')
+        resp.raise_for_status()
+        text = _agentic_response_text(resp)
+        return {
+            'content': text,
+            'error': None if text else 'agentic_raw_empty',
+            'http_status': status,
+            'content_type': content_type,
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+            'canonical_url': f'https://arxiv.org/abs/{arxiv_id}',
+        }
+    except Exception as exc:
+        return {
+            'content': '',
+            'error': f'{type(exc).__name__}: {exc}',
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+        }
+
+
+async def _run_agentic_data_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, AGENTIC_DATA_MAX_RESULTS))
+    if count <= 0:
+        return []
+    timeout = min(float(getattr(req, 'timeout', None) or AGENTIC_DATA_TIMEOUT), 120.0)
+    headers = _agentic_data_headers()
+    params = {
+        'type': 'retrieve',
+        'query': req.query,
+        'source': 'arxiv',
+        'top_k': str(count),
+        'return_contents': 'true',
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            _reserve_advanced_provider_quota('agentic_data')
+            resp = await client.get(AGENTIC_DATA_ARXIV_URL, params=params, headers=headers)
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail='Agentic Data returned 429 Too Many Requests')
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload.get('result') or payload.get('results') or []
+            if not isinstance(rows, list):
+                rows = []
+            items: List[SearchItem] = []
+            for idx, row in enumerate(rows[:count], start=1):
+                if not isinstance(row, dict):
+                    continue
+                arxiv_id = str(row.get('arxiv_id') or row.get('id') or '').strip()
+                url = str(row.get('url') or (f'https://arxiv.org/abs/{arxiv_id}' if arxiv_id else '')).strip()
+                title = _clean_arxiv_text(str(row.get('title') or url or 'Untitled'))
+                abstract = _clean_arxiv_text(str(row.get('abstract') or row.get('tldr') or ''))
+                contents_text = _agentic_text_from_payload(row.get('contents'))
+                raw_seed = contents_text or abstract
+                item = SearchItem(
+                    rank=idx,
+                    title=title,
+                    url=url,
+                    description=abstract[:3000],
+                    published=str(row.get('date') or row.get('publish_at') or '') or None,
+                    language='en',
+                    score=float(row.get('score')) if row.get('score') is not None else None,
+                    source='agentic_data',
+                    engine='agentic_data_retrieve',
+                    scraped=True,
+                    content_chars=len(raw_seed),
+                    content=_truncate_payload(raw_seed, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS),
+                    raw_content=raw_seed,
+                    extracted_content=raw_seed,
+                    usable_for_summary=bool(raw_seed),
+                    summary_input_mode='agentic_data_retrieve',
+                    quality_flags=['advanced_search', 'scientific_source', 'agentic_data', f'arxiv_id:{arxiv_id}'] if arxiv_id else ['advanced_search', 'scientific_source', 'agentic_data'],
+                    extract_method='agentic_data_retrieve',
+                    fetch_status='ok',
+                    http_status=200,
+                    content_type='application/json',
+                    canonical_url=url,
+                    provider_rank=idx,
+                )
+                full_result = await _fetch_agentic_full_text(client, arxiv_id, headers)
+                full_text = (full_result.get('content') or '').strip()
+                if full_text:
+                    item.raw_content = full_text
+                    item.extracted_content = full_text
+                    item.content_chars = len(full_text)
+                    item.extract_method = 'agentic_data_raw_markdown'
+                    item.fetch_ms = int(full_result.get('fetch_ms') or 0)
+                    item.http_status = int(full_result.get('http_status') or 200)
+                    item.content_type = str(full_result.get('content_type') or 'text/markdown')
+                    item.canonical_url = str(full_result.get('canonical_url') or url)
+                    if len(full_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                        item.content = await _summarize_paper_content(req.query, item, full_text, req.llm_options)
+                        item.summary_input_mode = 'agentic_data_llm_summary'
+                        flags = list(item.quality_flags or [])
+                        flags.append('content_llm_summary')
+                        item.quality_flags = flags
+                    else:
+                        item.content = _truncate_payload(full_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                        item.summary_input_mode = 'agentic_data_raw_markdown'
+                else:
+                    item.error = full_result.get('error') or item.error
+                    flags = list(item.quality_flags or [])
+                    flags.append('agentic_full_text_unavailable')
+                    item.quality_flags = flags
+                items.append(item)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='Agentic Data API timed out for advanced_search') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f'Agentic Data API failed: HTTP {exc.response.status_code}') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'Agentic Data API transport failed: {type(exc).__name__}') from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'Agentic Data API parse failed: {type(exc).__name__}: {exc}') from exc
+
+    for item in items:
+        item.score = item.score if item.score is not None else _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+
+
+def _sciencestack_headers() -> Dict[str, str]:
+    if not SCIENCESTACK_API_KEY:
+        raise HTTPException(status_code=503, detail='sciencestack advanced_search is not configured')
+    return {
+        'Accept': 'application/json, text/markdown;q=0.9, text/plain;q=0.8, */*;q=0.5',
+        'x-api-key': SCIENCESTACK_API_KEY,
+        'User-Agent': USER_AGENT,
+    }
+
+
+def _sciencestack_payload_data(payload: Any) -> Any:
+    if isinstance(payload, dict) and 'data' in payload:
+        return payload.get('data')
+    return payload
+
+
+def _sciencestack_text_from_payload(value: Any) -> str:
+    value = _sciencestack_payload_data(value)
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_sciencestack_text_from_payload(v) for v in value]
+        return '\n\n'.join([p for p in parts if p]).strip()
+    if isinstance(value, dict):
+        for key in ('markdown', 'content', 'text', 'body', 'latex', 'raw'):
+            text = _sciencestack_text_from_payload(value.get(key))
+            if text:
+                return text
+        parts = []
+        for key in ('title', 'abstract', 'aiSummary', 'tldr'):
+            if value.get(key):
+                parts.append(str(value.get(key)).strip())
+        for key in ('sections', 'nodes', 'children'):
+            text = _sciencestack_text_from_payload(value.get(key))
+            if text:
+                parts.append(text)
+        return '\n\n'.join([p for p in parts if p]).strip()
+    return str(value).strip()
+
+
+async def _fetch_sciencestack_content(client: httpx.AsyncClient, arxiv_id: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    if not arxiv_id:
+        return {'content': '', 'error': 'missing_arxiv_id'}
+    t0 = datetime.now()
+    try:
+        _reserve_advanced_provider_quota('sciencestack')
+        resp = await client.get(f'{SCIENCESTACK_API_URL}/papers/{arxiv_id}/content', params={'format': 'markdown'}, headers=headers)
+        status = resp.status_code
+        content_type = resp.headers.get('content-type')
+        if status == 429:
+            raise HTTPException(status_code=429, detail='ScienceStack returned 429 Too Many Requests')
+        resp.raise_for_status()
+        if 'json' in (content_type or '').lower():
+            text = _sciencestack_text_from_payload(resp.json())
+        else:
+            text = resp.text.strip()
+        return {
+            'content': text,
+            'error': None if text else 'sciencestack_content_empty',
+            'http_status': status,
+            'content_type': content_type,
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+            'canonical_url': f'https://arxiv.org/abs/{arxiv_id}',
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {
+            'content': '',
+            'error': f'{type(exc).__name__}: {exc}',
+            'fetch_ms': int((datetime.now() - t0).total_seconds() * 1000),
+        }
+
+
+async def _run_sciencestack_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, SCIENCESTACK_MAX_RESULTS))
+    if count <= 0:
+        return []
+    timeout = min(float(getattr(req, 'timeout', None) or SCIENCESTACK_TIMEOUT), 120.0)
+    headers = _sciencestack_headers()
+    params = {'q': req.query, 'limit': str(count)}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            _reserve_advanced_provider_quota('sciencestack')
+            resp = await client.get(f'{SCIENCESTACK_API_URL}/search', params=params, headers=headers)
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail='ScienceStack returned 429 Too Many Requests')
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = _sciencestack_payload_data(payload)
+            if not isinstance(rows, list):
+                rows = []
+            items: List[SearchItem] = []
+            for idx, row in enumerate(rows[:count], start=1):
+                if not isinstance(row, dict):
+                    continue
+                arxiv_id = str(row.get('arxivId') or row.get('arxiv_id') or row.get('id') or '').strip()
+                url = f'https://arxiv.org/abs/{arxiv_id}' if arxiv_id else str(row.get('url') or '').strip()
+                title = _clean_arxiv_text(str(row.get('title') or url or 'Untitled'))
+                abstract = _clean_arxiv_text(str(row.get('abstract') or row.get('tldr') or row.get('aiSummary') or ''))
+                seed_text = abstract or title
+                item = SearchItem(
+                    rank=idx,
+                    title=title,
+                    url=url,
+                    description=abstract[:3000],
+                    published=str(row.get('published') or row.get('publishedAt') or '') or None,
+                    language='en',
+                    score=None,
+                    source='sciencestack',
+                    engine='sciencestack_search',
+                    scraped=True,
+                    content_chars=len(seed_text),
+                    content=_truncate_payload(seed_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS),
+                    raw_content=seed_text,
+                    extracted_content=seed_text,
+                    usable_for_summary=bool(seed_text),
+                    summary_input_mode='sciencestack_search',
+                    quality_flags=['advanced_search', 'scientific_source', 'sciencestack', f'arxiv_id:{arxiv_id}'] if arxiv_id else ['advanced_search', 'scientific_source', 'sciencestack'],
+                    extract_method='sciencestack_search',
+                    fetch_status='ok',
+                    http_status=200,
+                    content_type='application/json',
+                    canonical_url=url,
+                    provider_rank=idx,
+                )
+                content_result = await _fetch_sciencestack_content(client, arxiv_id, headers)
+                full_text = (content_result.get('content') or '').strip()
+                if full_text:
+                    item.raw_content = full_text
+                    item.extracted_content = full_text
+                    item.content_chars = len(full_text)
+                    item.extract_method = 'sciencestack_markdown'
+                    item.fetch_ms = int(content_result.get('fetch_ms') or 0)
+                    item.http_status = int(content_result.get('http_status') or 200)
+                    item.content_type = str(content_result.get('content_type') or 'text/markdown')
+                    item.canonical_url = str(content_result.get('canonical_url') or url)
+                    if len(full_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                        item.content = await _summarize_paper_content(req.query, item, full_text, req.llm_options)
+                        item.summary_input_mode = 'sciencestack_llm_summary'
+                        flags = list(item.quality_flags or [])
+                        flags.append('content_llm_summary')
+                        item.quality_flags = flags
+                    else:
+                        item.content = _truncate_payload(full_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                        item.summary_input_mode = 'sciencestack_markdown'
+                else:
+                    item.error = content_result.get('error') or item.error
+                    flags = list(item.quality_flags or [])
+                    flags.append('sciencestack_content_unavailable')
+                    item.quality_flags = flags
+                items.append(item)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='ScienceStack API timed out for advanced_search') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f'ScienceStack API failed: HTTP {exc.response.status_code}') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'ScienceStack API transport failed: {type(exc).__name__}') from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'ScienceStack API parse failed: {type(exc).__name__}: {exc}') from exc
+
+    for item in items:
+        item.score = _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+
+
+def _oanor_headers() -> Dict[str, str]:
+    if not OANOR_API_KEY:
+        raise HTTPException(status_code=503, detail='oanor advanced_search is not configured')
+    return {
+        'Accept': 'application/json, */*;q=0.5',
+        'x-oanor-key': OANOR_API_KEY,
+        'User-Agent': USER_AGENT,
+    }
+
+
+def _oanor_data_rows(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('data', 'results', 'items', 'papers'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        for key in ('result', 'paper'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _oanor_first(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        if not value:
+            return ''
+        if all(isinstance(v, str) for v in value):
+            return ', '.join([v.strip() for v in value if v.strip()])
+        return _oanor_first(value[0])
+    if isinstance(value, dict):
+        for key in ('name', 'title', 'value', 'url', 'href'):
+            if value.get(key):
+                return _oanor_first(value.get(key))
+    return str(value).strip()
+
+
+def _oanor_pdf_url(row: Dict[str, Any]) -> str:
+    for key in ('pdf_url', 'pdfUrl', 'pdf', 'pdfLink'):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            candidate = _oanor_first(value)
+            if candidate:
+                return candidate
+    links = row.get('links') or row.get('link') or []
+    if isinstance(links, dict):
+        links = [links]
+    if isinstance(links, list):
+        for link in links:
+            if isinstance(link, dict):
+                title = str(link.get('title') or link.get('rel') or link.get('type') or '').lower()
+                href = _oanor_first(link.get('href') or link.get('url'))
+                if href and ('pdf' in title or href.endswith('.pdf') or '/pdf/' in href):
+                    return href
+            elif isinstance(link, str) and ('/pdf/' in link or link.endswith('.pdf')):
+                return link.strip()
+    return ''
+
+
+def _oanor_arxiv_id(row: Dict[str, Any]) -> str:
+    for key in ('arxiv_id', 'arxivId', 'id'):
+        value = _oanor_first(row.get(key))
+        if value:
+            return value.replace('arXiv:', '').strip()
+    url = _oanor_first(row.get('url') or row.get('abs_url') or row.get('absUrl'))
+    match = re.search(r'arxiv\.org/(?:abs|pdf)/([^?#]+)', url)
+    return match.group(1).replace('.pdf', '').strip() if match else ''
+
+
+async def _run_oanor_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, OANOR_MAX_RESULTS))
+    if count <= 0:
+        return []
+    timeout = min(float(getattr(req, 'timeout', None) or OANOR_TIMEOUT), 120.0)
+    headers = _oanor_headers()
+    params = {'q': req.query, 'limit': str(count)}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            _reserve_advanced_provider_quota('oanor')
+            resp = await client.get(f'{OANOR_ARXIV_API_URL}/v1/search', params=params, headers=headers)
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail='Oanor returned 429 Too Many Requests')
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = _oanor_data_rows(payload)
+            items: List[SearchItem] = []
+            for idx, row in enumerate(rows[:count], start=1):
+                if not isinstance(row, dict):
+                    continue
+                arxiv_id = _oanor_arxiv_id(row)
+                pdf_url = _oanor_pdf_url(row) or (f'https://arxiv.org/pdf/{arxiv_id}' if arxiv_id else '')
+                url = _oanor_first(row.get('url') or row.get('abs_url') or row.get('absUrl')) or (f'https://arxiv.org/abs/{arxiv_id}' if arxiv_id else pdf_url)
+                title = _clean_arxiv_text(_oanor_first(row.get('title')) or url or 'Untitled')
+                abstract = _clean_arxiv_text(_oanor_first(row.get('abstract') or row.get('summary') or row.get('description')))
+                authors = _oanor_first(row.get('authors') or row.get('author'))
+                seed_parts = [p for p in [title, f'Authors: {authors}' if authors else '', abstract] if p]
+                seed_text = '\n\n'.join(seed_parts).strip()
+                item = SearchItem(
+                    rank=idx,
+                    title=title,
+                    url=url,
+                    description=abstract[:3000],
+                    published=_oanor_first(row.get('published') or row.get('published_at') or row.get('updated')) or None,
+                    language='en',
+                    score=None,
+                    source='oanor',
+                    engine='oanor_arxiv_api',
+                    scraped=True,
+                    content_chars=len(seed_text),
+                    content=_truncate_payload(seed_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS),
+                    raw_content=seed_text,
+                    extracted_content=seed_text,
+                    usable_for_summary=bool(seed_text),
+                    summary_input_mode='oanor_metadata',
+                    quality_flags=['advanced_search', 'scientific_source', 'oanor', f'arxiv_id:{arxiv_id}', f'pdf_url:{pdf_url}'],
+                    extract_method='oanor_arxiv_api',
+                    fetch_status='ok',
+                    http_status=200,
+                    content_type='application/json',
+                    canonical_url=url,
+                    provider_rank=idx,
+                )
+                if pdf_url:
+                    pdf_result = await _fetch_arxiv_pdf_text(pdf_url, timeout=timeout)
+                    pdf_text = (pdf_result.get('content') or '').strip()
+                    if pdf_text:
+                        item.raw_content = pdf_text
+                        item.extracted_content = pdf_text
+                        item.content_chars = len(pdf_text)
+                        item.extract_method = 'oanor_arxiv_pdf_pypdf'
+                        item.fetch_ms = int(pdf_result.get('fetch_ms') or 0)
+                        item.http_status = int(pdf_result.get('http_status') or 200)
+                        item.content_type = str(pdf_result.get('content_type') or 'application/pdf')
+                        item.canonical_url = str(pdf_result.get('canonical_url') or pdf_url or url)
+                        if len(pdf_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                            item.content = await _summarize_paper_content(req.query, item, pdf_text, req.llm_options)
+                            item.summary_input_mode = 'oanor_pdf_llm_summary'
+                            flags = list(item.quality_flags or [])
+                            flags.append('content_llm_summary')
+                            item.quality_flags = flags
+                        else:
+                            item.content = _truncate_payload(pdf_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                            item.summary_input_mode = 'oanor_pdf_text'
+                    else:
+                        item.error = pdf_result.get('error') or item.error
+                        flags = list(item.quality_flags or [])
+                        flags.append('pdf_text_unavailable')
+                        item.quality_flags = flags
+                items.append(item)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='Oanor API timed out for advanced_search') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f'Oanor API failed: HTTP {exc.response.status_code}') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'Oanor API transport failed: {type(exc).__name__}') from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'Oanor API parse failed: {type(exc).__name__}: {exc}') from exc
+
+    for item in items:
+        item.score = _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+
+
+def _searchapi_auth_params() -> Dict[str, str]:
+    if not SEARCHAPI_API_KEY:
+        raise HTTPException(status_code=503, detail='searchapi_scholar advanced_search is not configured')
+    return {'api_key': SEARCHAPI_API_KEY}
+
+
+def _searchapi_author_names(value: Any) -> str:
+    if not value:
+        return ''
+    if isinstance(value, list):
+        names = []
+        for item in value:
+            if isinstance(item, dict) and item.get('name'):
+                names.append(str(item.get('name')).strip())
+            elif isinstance(item, str):
+                names.append(item.strip())
+        return ', '.join([n for n in names if n])
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _searchapi_best_url(row: Dict[str, Any]) -> str:
+    resource = row.get('resource') if isinstance(row.get('resource'), dict) else {}
+    resource_link = str(resource.get('link') or '').strip()
+    if resource_link:
+        return resource_link
+    return str(row.get('link') or '').strip()
+
+
+async def _run_searchapi_scholar_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, SEARCHAPI_MAX_RESULTS))
+    if count <= 0:
+        return []
+    timeout = min(float(getattr(req, 'timeout', None) or SEARCHAPI_TIMEOUT), 120.0)
+    params = {
+        'engine': 'google_scholar',
+        'q': req.query,
+        'num': str(min(count, 20)),
+    }
+    params.update(_searchapi_auth_params())
+    headers = {'Accept': 'application/json', 'User-Agent': USER_AGENT}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            _reserve_advanced_provider_quota('searchapi_scholar')
+            resp = await client.get(SEARCHAPI_API_URL, params=params, headers=headers)
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail='SearchAPI returned 429 Too Many Requests')
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload.get('organic_results') or []
+            if not isinstance(rows, list):
+                rows = []
+            items: List[SearchItem] = []
+            for idx, row in enumerate(rows[:count], start=1):
+                if not isinstance(row, dict):
+                    continue
+                url = _searchapi_best_url(row)
+                if not url:
+                    continue
+                title = _clean_arxiv_text(str(row.get('title') or url))
+                snippet = _clean_arxiv_text(str(row.get('snippet') or ''))
+                publication = _clean_arxiv_text(str(row.get('publication') or ''))
+                authors = _searchapi_author_names(row.get('authors'))
+                seed_parts = [p for p in [title, publication, f'Authors: {authors}' if authors else '', snippet] if p]
+                seed_text = '\n\n'.join(seed_parts).strip()
+                item = SearchItem(
+                    rank=idx,
+                    title=title,
+                    url=url,
+                    description=snippet[:3000],
+                    published=None,
+                    language='en',
+                    score=None,
+                    source='searchapi_scholar',
+                    engine='searchapi_google_scholar',
+                    scraped=False,
+                    content_chars=len(seed_text),
+                    content=_truncate_payload(seed_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS),
+                    raw_content=seed_text,
+                    extracted_content=seed_text,
+                    usable_for_summary=bool(seed_text),
+                    summary_input_mode='searchapi_scholar_metadata',
+                    quality_flags=['advanced_search', 'scientific_source', 'searchapi_scholar'],
+                    extract_method='searchapi_google_scholar',
+                    fetch_status='metadata_only',
+                    http_status=200,
+                    content_type='application/json',
+                    canonical_url=url,
+                    provider_rank=int(row.get('position') or idx),
+                )
+                try:
+                    extracted = await _extract_content(url, timeout)
+                except Exception as exc:
+                    extracted = {'content': '', 'error': f'{type(exc).__name__}: {exc}'}
+                extracted_text = (extracted.get('content') or '').strip()
+                if extracted_text:
+                    item.raw_content = extracted_text
+                    item.extracted_content = extracted_text
+                    item.content_chars = len(extracted_text)
+                    item.scraped = True
+                    item.fetch_ms = int(extracted.get('fetch_ms') or 0)
+                    item.http_status = int(extracted.get('http_status') or 200)
+                    item.content_type = str(extracted.get('content_type') or '') or item.content_type
+                    item.canonical_url = str(extracted.get('canonical_url') or url)
+                    item.extract_method = str(extracted.get('extract_method') or 'searchapi_fetch')
+                    item.fetch_status = 'ok'
+                    if len(extracted_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                        item.content = await _summarize_paper_content(req.query, item, extracted_text, req.llm_options)
+                        item.summary_input_mode = 'searchapi_scholar_llm_summary'
+                        flags = list(item.quality_flags or [])
+                        flags.append('content_llm_summary')
+                        item.quality_flags = flags
+                    else:
+                        item.content = _truncate_payload(extracted_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                        item.summary_input_mode = 'searchapi_scholar_extracted_text'
+                else:
+                    item.error = extracted.get('error') or item.error
+                    item.failure_reason = extracted.get('failure_reason') or item.failure_reason
+                    flags = list(item.quality_flags or [])
+                    flags.append('content_unavailable')
+                    item.quality_flags = flags
+                items.append(item)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='SearchAPI Google Scholar timed out for advanced_search') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f'SearchAPI Google Scholar failed: HTTP {exc.response.status_code}') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'SearchAPI Google Scholar transport failed: {type(exc).__name__}') from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'SearchAPI Google Scholar parse failed: {type(exc).__name__}: {exc}') from exc
+
+    for item in items:
+        item.score = _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+
+
+def _advanced_provider_failure_status(exc: HTTPException) -> int:
+    status = int(exc.status_code or 500)
+    detail_text = json.dumps(exc.detail) if isinstance(exc.detail, (dict, list)) else str(exc.detail or '')
+    match = re.search(r'HTTP\s+(\d{3})', detail_text)
+    if match:
+        try:
+            return int(match.group(1))
+        except Exception:
+            pass
+    return status
+
+
+def _advanced_provider_failure_reason(exc: HTTPException) -> str:
+    if isinstance(exc.detail, dict):
+        return str(exc.detail.get('reason') or exc.detail.get('message') or exc.detail)
+    return str(exc.detail or type(exc).__name__)
+
+async def _call_advanced_provider(provider: str, req: SearchRequest) -> List[SearchItem]:
+    _raise_if_advanced_provider_cooling(provider)
+    try:
+        if provider == 'agentic_data':
+            items = await _run_agentic_data_search(req)
+        elif provider == 'sciencestack':
+            items = await _run_sciencestack_search(req)
+        elif provider == 'oanor':
+            items = await _run_oanor_search(req)
+        elif provider == 'searchapi_scholar':
+            items = await _run_searchapi_scholar_search(req)
+        elif provider == 'serpapi_scholar':
+            items = await _run_serpapi_scholar_search(req)
+        elif provider == 'arxiv':
+            items = await _run_arxiv_search(req)
+        else:
+            raise HTTPException(status_code=400, detail=f'advanced_search source {provider!r} is not supported yet')
+    except HTTPException as exc:
+        status = _advanced_provider_failure_status(exc)
+        if status in (402, 429, 502, 503, 504):
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            retry_after = None
+            if isinstance(detail, dict) and detail.get('retry_after_seconds') is not None:
+                try:
+                    retry_after = int(detail.get('retry_after_seconds'))
+                except Exception:
+                    retry_after = None
+            _mark_advanced_provider_failure(provider, status, _advanced_provider_failure_reason(exc), retry_after=retry_after)
+        raise
+    if items:
+        _mark_advanced_provider_success(provider)
+    return items
+
+
+def _advanced_clone_for_provider(req: SearchRequest, per_provider_count: int) -> SearchRequest:
+    clone = SearchRequest(**_model_dict(req))
+    clone.topic = None
+    clone.count = per_provider_count
+    clone.max_results = per_provider_count
+    return clone
+
+
+
+
+def _normalize_science_classifier_payload(parsed: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return {'is_science': False, 'confidence': 0.0, 'reason': 'classifier_returned_non_json'}
+    raw_value = parsed.get('is_science')
+    if raw_value is None:
+        raw_value = parsed.get('science')
+    if raw_value is None:
+        raw_value = parsed.get('scientific')
+    if isinstance(raw_value, str):
+        is_science = raw_value.strip().lower() in ('1', 'true', 'yes', 'y', 'science', 'scientific')
+    else:
+        is_science = bool(raw_value)
+    try:
+        confidence = max(0.0, min(1.0, float(parsed.get('confidence', 0.0))))
+    except Exception:
+        confidence = 0.0
+    category = str(parsed.get('category') or '').strip().lower()
+    reason = str(parsed.get('reason') or '').strip()
+    return {
+        'is_science': bool(is_science and confidence >= SCIENCE_CLASSIFIER_CONFIDENCE_THRESHOLD),
+        'raw_is_science': bool(is_science),
+        'confidence': confidence,
+        'category': category,
+        'reason': reason,
+    }
+
+
+async def _classify_science_query(query: str, llm_options: Optional[LLMOptions] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+    if not SCIENCE_CLASSIFIER_ENABLED:
+        return {'is_science': False, 'confidence': 0.0, 'reason': 'science_classifier_disabled'}
+    if not SUMMARIZER_ENABLED or not _LITELLM_AVAILABLE:
+        return {'is_science': False, 'confidence': 0.0, 'reason': 'science_classifier_llm_unavailable'}
+    resolved_llm = _resolve_llm_options(llm_options)
+    resolved_llm['response_format'] = 'json_object'
+    resolved_llm['max_completion_tokens'] = max(32, min(SCIENCE_CLASSIFIER_MAX_COMPLETION_TOKENS, int(resolved_llm.get('max_completion_tokens') or SCIENCE_CLASSIFIER_MAX_COMPLETION_TOKENS)))
+    resolved_llm['timeout'] = max(1.0, min(SCIENCE_CLASSIFIER_TIMEOUT, float(resolved_llm.get('timeout') or SCIENCE_CLASSIFIER_TIMEOUT)))
+    resolved_llm['max_total_seconds'] = max(1.0, min(SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS, float(resolved_llm.get('max_total_seconds') or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS)))
+    messages = [
+        {'role': 'system', 'content': (
+            'Classify whether a search query should use scientific or scholarly retrieval in addition to web search. '
+            'Return ONLY JSON. Do not explain outside JSON.'
+        )},
+        {'role': 'user', 'content': (
+            'Return JSON with fields is_science boolean, confidence number 0-1, category string, reason string.\n'
+            'Mark true for queries about science, engineering, medicine, biology, chemistry, physics, materials, batteries, climate, geology, math, statistics, machine learning research, papers, patents, datasets, experiments, technical mechanisms, or academic topics.\n'
+            'Mark false for ordinary consumer, local, entertainment, sports, shopping, general news, or navigation searches unless they ask for scientific/technical evidence.\n\n'
+            f'Query: {query}'
+        )},
+    ]
+    started = time.monotonic()
+    attempts: List[Dict[str, Any]] = []
+    allow_expensive = bool(resolved_llm.get('allow_expensive_fallback'))
+    for spec in _build_llm_candidate_specs(resolved_llm):
+        if time.monotonic() - started > float(resolved_llm.get('max_total_seconds') or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS):
+            attempt = {'purpose': 'science_classifier', 'request_id': request_id, 'provider': spec['provider'], 'model': spec['model'], 'role': 'classifier', 'success': False, 'failure_type': 'budget_exhausted'}
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            break
+        if not allow_expensive and _is_expensive_llm_spec(spec) and spec != {'provider': resolved_llm['provider'], 'model': resolved_llm['model']}:
+            attempt = {'purpose': 'science_classifier', 'request_id': request_id, 'provider': spec['provider'], 'model': spec['model'], 'role': 'classifier', 'success': False, 'failure_type': 'expensive_fallback_blocked'}
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            continue
+        t0 = time.monotonic()
+        try:
+            remaining = _remaining_llm_timeout(started, float(resolved_llm.get('max_total_seconds') or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS), float(resolved_llm.get('timeout') or SCIENCE_CLASSIFIER_TIMEOUT))
+            if remaining <= 0:
+                raise asyncio.TimeoutError('science_classifier_budget_exhausted')
+            llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=remaining)
+            payload = _extract_llm_response_payload(llm_resp)
+            parsed = _extract_json_from_text(payload.get('raw') or '')
+            normalized = _normalize_science_classifier_payload(parsed)
+            success = isinstance(parsed, dict)
+            attempt = {
+                'purpose': 'science_classifier',
+                'request_id': request_id,
+                'provider': spec['provider'],
+                'model': spec['model'],
+                'role': 'classifier',
+                'success': success,
+                'failure_type': None if success else 'invalid_json',
+                'latency_ms': int((time.monotonic() - t0) * 1000),
+                'finish_reason': payload.get('finish_reason'),
+                'classification': normalized.get('is_science'),
+                'confidence': normalized.get('confidence'),
+                'category': normalized.get('category'),
+            }
+            if payload.get('usage'):
+                attempt['usage'] = payload.get('usage')
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            if success:
+                normalized['provider'] = spec['provider']
+                normalized['model'] = spec['model']
+                normalized['attempts'] = attempts
+                return normalized
+        except Exception as exc:
+            attempt = {
+                'purpose': 'science_classifier',
+                'request_id': request_id,
+                'provider': spec['provider'],
+                'model': spec['model'],
+                'role': 'classifier',
+                'success': False,
+                'failure_type': type(exc).__name__,
+                'error': str(exc),
+                'latency_ms': int((time.monotonic() - t0) * 1000),
+            }
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            continue
+    return {'is_science': False, 'confidence': 0.0, 'reason': 'science_classifier_failed', 'attempts': attempts}
+
+async def _run_advanced_search_auto(req: SearchRequest) -> List[SearchItem]:
+    requested = max(1, _resolve_max_results(req))
+    min_successes = max(1, ADVANCED_SEARCH_AUTO_MIN_PROVIDERS)
+    max_providers = max(min_successes, ADVANCED_SEARCH_AUTO_MAX_PROVIDERS)
+    target_results = max(requested, min_successes)
+    per_provider_count = 1
+    order = []
+    for raw in ADVANCED_SEARCH_AUTO_PROVIDER_ORDER:
+        provider = raw.strip().lower().replace('-', '_')
+        if provider in ('searchapi', 'google_scholar', 'scholar'):
+            provider = 'searchapi_scholar'
+        if provider in ('serpapi', 'serpapi_google_scholar'):
+            provider = 'serpapi_scholar'
+        if provider in _advanced_provider_names() and provider not in order:
+            order.append(provider)
+    for provider in _advanced_provider_names():
+        if provider not in order:
+            order.append(provider)
+
+    items: List[SearchItem] = []
+    seen_urls = set()
+    successes = 0
+    failures: List[Dict[str, Any]] = []
+    attempted = 0
+    for provider in order:
+        if attempted >= max_providers:
+            break
+        cooldown_remaining = _advanced_provider_cooldown_remaining(provider)
+        if cooldown_remaining > 0:
+            failures.append({'provider': provider, 'status_code': 429, 'reason': 'cooldown', 'retry_after_seconds': cooldown_remaining})
+            continue
+        attempted += 1
+        provider_req = _advanced_clone_for_provider(req, per_provider_count)
+        try:
+            provider_items = await _call_advanced_provider(provider, provider_req)
+        except HTTPException as exc:
+            failures.append({'provider': provider, 'status_code': exc.status_code, 'detail': exc.detail})
+            continue
+        if provider_items:
+            successes += 1
+            for item in provider_items:
+                key = (item.url or item.canonical_url or item.title or '').strip().lower()
+                if key and key in seen_urls:
+                    continue
+                if key:
+                    seen_urls.add(key)
+                flags = list(item.quality_flags or [])
+                flags.append(f'advanced_auto_provider:{provider}')
+                item.quality_flags = flags
+                item.rank = len(items) + 1
+                items.append(item)
+        if successes >= min_successes and len(items) >= target_results:
+            break
+
+    if not items:
+        raise HTTPException(status_code=502, detail={
+            'source': 'advanced_auto',
+            'reason': 'all_advanced_providers_failed',
+            'provider_failures': failures,
+        })
+    for item in items:
+        item.score = _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items[:target_results]
+
+
+
+
+def _serpapi_auth_params() -> Dict[str, str]:
+    if not SERPAPI_API_KEY:
+        raise HTTPException(status_code=503, detail='serpapi_scholar advanced_search is not configured')
+    return {'api_key': SERPAPI_API_KEY}
+
+
+def _serpapi_publication_text(value: Any) -> str:
+    if not value:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        pieces = []
+        if value.get('summary'):
+            pieces.append(str(value.get('summary')).strip())
+        authors = value.get('authors')
+        if isinstance(authors, list):
+            names = []
+            for author in authors:
+                if isinstance(author, dict) and author.get('name'):
+                    names.append(str(author.get('name')).strip())
+                elif isinstance(author, str):
+                    names.append(author.strip())
+            if names:
+                pieces.append('Authors: ' + ', '.join(names))
+        return '\n'.join([p for p in pieces if p]).strip()
+    return str(value).strip()
+
+
+def _serpapi_best_url(row: Dict[str, Any]) -> str:
+    resources = row.get('resources')
+    if isinstance(resources, list):
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            link = str(resource.get('link') or '').strip()
+            title = str(resource.get('title') or resource.get('file_format') or '').lower()
+            if link and ('pdf' in title or link.lower().endswith('.pdf')):
+                return link
+        for resource in resources:
+            if isinstance(resource, dict) and resource.get('link'):
+                return str(resource.get('link')).strip()
+    return str(row.get('link') or '').strip()
+
+
+async def _run_serpapi_scholar_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, SERPAPI_MAX_RESULTS))
+    if count <= 0:
+        return []
+    timeout = min(float(getattr(req, 'timeout', None) or SERPAPI_TIMEOUT), 120.0)
+    params = {
+        'engine': 'google_scholar',
+        'q': req.query,
+        'num': str(min(count, 20)),
+    }
+    params.update(_serpapi_auth_params())
+    headers = {'Accept': 'application/json', 'User-Agent': USER_AGENT}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            _reserve_advanced_provider_quota('serpapi_scholar')
+            resp = await client.get(SERPAPI_API_URL, params=params, headers=headers)
+            if resp.status_code == 429:
+                raise HTTPException(status_code=429, detail='SerpApi returned 429 Too Many Requests')
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict) and payload.get('error'):
+                raise HTTPException(status_code=502, detail=f"SerpApi error: {payload.get('error')}")
+            rows = payload.get('organic_results') or []
+            if not isinstance(rows, list):
+                rows = []
+            items: List[SearchItem] = []
+            for idx, row in enumerate(rows[:count], start=1):
+                if not isinstance(row, dict):
+                    continue
+                url = _serpapi_best_url(row)
+                if not url:
+                    continue
+                title = _clean_arxiv_text(str(row.get('title') or url))
+                snippet = _clean_arxiv_text(str(row.get('snippet') or ''))
+                publication = _clean_arxiv_text(_serpapi_publication_text(row.get('publication_info')))
+                seed_parts = [p for p in [title, publication, snippet] if p]
+                seed_text = '\n\n'.join(seed_parts).strip()
+                item = SearchItem(
+                    rank=idx,
+                    title=title,
+                    url=url,
+                    description=snippet[:3000],
+                    published=None,
+                    language='en',
+                    score=None,
+                    source='serpapi_scholar',
+                    engine='serpapi_google_scholar',
+                    scraped=False,
+                    content_chars=len(seed_text),
+                    content=_truncate_payload(seed_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS),
+                    raw_content=seed_text,
+                    extracted_content=seed_text,
+                    usable_for_summary=bool(seed_text),
+                    summary_input_mode='serpapi_scholar_metadata',
+                    quality_flags=['advanced_search', 'scientific_source', 'serpapi_scholar'],
+                    extract_method='serpapi_google_scholar',
+                    fetch_status='metadata_only',
+                    http_status=200,
+                    content_type='application/json',
+                    canonical_url=url,
+                    provider_rank=int(row.get('position') or idx),
+                )
+                try:
+                    extracted = await _extract_content(url, timeout)
+                except Exception as exc:
+                    extracted = {'content': '', 'error': f'{type(exc).__name__}: {exc}'}
+                extracted_text = (extracted.get('content') or '').strip()
+                if extracted_text:
+                    item.raw_content = extracted_text
+                    item.extracted_content = extracted_text
+                    item.content_chars = len(extracted_text)
+                    item.scraped = True
+                    item.fetch_ms = int(extracted.get('fetch_ms') or 0)
+                    item.http_status = int(extracted.get('http_status') or 200)
+                    item.content_type = str(extracted.get('content_type') or '') or item.content_type
+                    item.canonical_url = str(extracted.get('canonical_url') or url)
+                    item.extract_method = str(extracted.get('extract_method') or 'serpapi_fetch')
+                    item.fetch_status = 'ok'
+                    if len(extracted_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                        item.content = await _summarize_paper_content(req.query, item, extracted_text, req.llm_options)
+                        item.summary_input_mode = 'serpapi_scholar_llm_summary'
+                        flags = list(item.quality_flags or [])
+                        flags.append('content_llm_summary')
+                        item.quality_flags = flags
+                    else:
+                        item.content = _truncate_payload(extracted_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                        item.summary_input_mode = 'serpapi_scholar_extracted_text'
+                else:
+                    item.error = extracted.get('error') or item.error
+                    item.failure_reason = extracted.get('failure_reason') or item.failure_reason
+                    flags = list(item.quality_flags or [])
+                    flags.append('content_unavailable')
+                    item.quality_flags = flags
+                items.append(item)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='SerpApi Google Scholar timed out for advanced_search') from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f'SerpApi Google Scholar failed: HTTP {exc.response.status_code}') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'SerpApi Google Scholar transport failed: {type(exc).__name__}') from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'SerpApi Google Scholar parse failed: {type(exc).__name__}: {exc}') from exc
+
+    for item in items:
+        item.score = _score_item(item, req.query)
+    items.sort(key=lambda i: (i.score or 0, -i.rank), reverse=True)
+    return items
+
+async def _run_advanced_search(req: SearchRequest) -> List[SearchItem]:
+    if not ADVANCED_SEARCH_ENABLED:
+        raise HTTPException(status_code=503, detail='advanced_search is disabled')
+    source = _resolve_advanced_source(req)
+    if source == 'auto':
+        return await _run_advanced_search_auto(req)
+    return await _call_advanced_provider(source, req)
+
+
+async def _run_arxiv_search(req: SearchRequest) -> List[SearchItem]:
+    count = min(_resolve_max_results(req), max(1, ARXIV_MAX_RESULTS))
+    if count <= 0:
+        return []
+    compiled_query = _compile_arxiv_query(req.query)
+    params = {
+        'search_query': compiled_query,
+        'start': '0',
+        'max_results': str(count),
+    }
+    headers = {
+        'Accept': 'application/atom+xml, application/xml;q=0.9, */*;q=0.5',
+        'User-Agent': ARXIV_USER_AGENT or USER_AGENT,
+    }
+    timeout = min(float(getattr(req, 'timeout', None) or ARXIV_TIMEOUT), 120.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await _arxiv_rate_limited_get(client, ARXIV_API_URL, params=params, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail='arXiv export API timed out for advanced_search') from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f'arXiv export API transport failed: {type(exc).__name__}') from exc
+    try:
+        resp.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'arXiv export API failed: HTTP {resp.status_code}') from exc
+    try:
+        items = _parse_arxiv_entries(resp.content, query=req.query, compiled_query=compiled_query, count=count)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f'arXiv Atom parse failed: {type(exc).__name__}: {exc}') from exc
+
+    if _arxiv_wants_pdf_text(req) and items:
+        for item in items:
+            pdf_url = ''
+            for flag in item.quality_flags or []:
+                if flag.startswith('pdf_url:'):
+                    pdf_url = flag.split(':', 1)[1]
+                    break
+            pdf_result = await _fetch_arxiv_pdf_text(pdf_url, timeout=timeout)
+            pdf_text = (pdf_result.get('content') or '').strip()
+            if pdf_text:
+                item.raw_content = pdf_text
+                item.extracted_content = pdf_text
+                if len(pdf_text) > ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS:
+                    item.content = await _summarize_paper_content(req.query, item, pdf_text, req.llm_options)
+                    item.summary_input_mode = 'arxiv_pdf_llm_summary'
+                    flags = list(item.quality_flags or [])
+                    flags.append('content_llm_summary')
+                    item.quality_flags = flags
+                else:
+                    item.content = _truncate_payload(pdf_text, ARXIV_CONTENT_SUMMARY_THRESHOLD_CHARS)
+                    item.summary_input_mode = 'arxiv_pdf_text'
+                item.content_chars = len(pdf_text)
+                item.extract_method = 'arxiv_pdf_pypdf'
+                item.fetch_ms = int(pdf_result.get('fetch_ms') or 0)
+                item.http_status = int(pdf_result.get('http_status') or 200)
+                item.content_type = str(pdf_result.get('content_type') or 'application/pdf')
+                item.canonical_url = str(pdf_result.get('canonical_url') or pdf_url or item.canonical_url)
+                flags = list(item.quality_flags or [])
+                flags.append(f'pdf_bytes:{pdf_result.get("bytes") or 0}')
+                item.quality_flags = flags
+            else:
+                item.error = pdf_result.get('error') or item.error
+                item.failure_reason = pdf_result.get('error') or item.failure_reason
+                flags = list(item.quality_flags or [])
+                flags.append('pdf_text_unavailable')
+                item.quality_flags = flags
+
+    return items
 
 
 async def _run_search(req: SearchRequest) -> List[SearchItem]:
@@ -1677,7 +3630,7 @@ def _remaining_llm_timeout(started: float, total_budget: float, per_call_timeout
         return 0.0
     return max(1.0, min(float(per_call_timeout), remaining))
 
-async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Dict[str, Any], candidate_items: List[SearchItem]) -> Dict[str, Any]:
+async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Dict[str, Any], candidate_items: List[SearchItem], purpose: str = 'search_summary', request_id: Optional[str] = None) -> Dict[str, Any]:
     started = time.monotonic()
     attempts: List[Dict[str, Any]] = []
     last_payload: Dict[str, Any] = {}
@@ -1687,10 +3640,14 @@ async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Di
 
     for spec in _build_llm_candidate_specs(resolved_llm):
         if time.monotonic() - started > total_budget:
-            attempts.append({'provider': spec['provider'], 'model': spec['model'], 'success': False, 'failure_type': 'budget_exhausted'})
+            attempt = {'provider': spec['provider'], 'model': spec['model'], 'role': 'answer', 'success': False, 'failure_type': 'budget_exhausted'}
+            attempts.append(attempt)
+            _log_llm_attempt({**attempt, 'purpose': purpose, 'request_id': request_id})
             break
         if not allow_expensive and _is_expensive_llm_spec(spec) and spec != {'provider': resolved_llm['provider'], 'model': resolved_llm['model']}:
-            attempts.append({'provider': spec['provider'], 'model': spec['model'], 'success': False, 'failure_type': 'expensive_fallback_blocked'})
+            attempt = {'provider': spec['provider'], 'model': spec['model'], 'role': 'answer', 'success': False, 'failure_type': 'expensive_fallback_blocked'}
+            attempts.append(attempt)
+            _log_llm_attempt({**attempt, 'purpose': purpose, 'request_id': request_id})
             continue
         t0 = time.monotonic()
         try:
@@ -1715,6 +3672,7 @@ async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Di
             if payload.get('usage'):
                 attempt['usage'] = payload.get('usage')
             attempts.append(attempt)
+            _log_llm_attempt({**attempt, 'purpose': purpose, 'request_id': request_id})
             if validation['ok']:
                 return {'ok': True, 'parsed': validation['payload'], 'raw': payload.get('raw'), 'finish_reason': payload.get('finish_reason'), 'usage': payload.get('usage'), 'provider': spec['provider'], 'model': spec['model'], 'attempts': attempts, 'repaired': False}
             for repair_index in range(repair_limit):
@@ -1727,7 +3685,7 @@ async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Di
                     repair_validation = _validate_summary_payload(repair_result.get('parsed'), candidate_items)
                     repair_spec = repair_result.get('spec') or spec
                     repair_payload = repair_result.get('response') or {}
-                    attempts.append({
+                    repair_attempt = {
                         'provider': repair_spec['provider'],
                         'model': repair_spec['model'],
                         'role': 'repair',
@@ -1736,13 +3694,19 @@ async def _run_llm_orchestrator(messages: List[Dict[str, str]], resolved_llm: Di
                         'reasons': repair_validation.get('reasons') or [],
                         'latency_ms': int((time.monotonic() - rt0) * 1000),
                         'finish_reason': repair_payload.get('finish_reason'),
-                    })
+                    }
+                    attempts.append(repair_attempt)
+                    _log_llm_attempt({**repair_attempt, 'purpose': purpose, 'request_id': request_id})
                     if repair_validation['ok']:
                         return {'ok': True, 'parsed': repair_validation['payload'], 'raw': repair_payload.get('raw'), 'finish_reason': repair_payload.get('finish_reason'), 'usage': repair_payload.get('usage'), 'provider': repair_spec['provider'], 'model': repair_spec['model'], 'attempts': attempts, 'repaired': True}
                 except Exception as repair_exc:
-                    attempts.append({'provider': spec['provider'], 'model': spec['model'], 'role': 'repair', 'success': False, 'failure_type': type(repair_exc).__name__, 'error': str(repair_exc), 'latency_ms': int((time.monotonic() - rt0) * 1000)})
+                    repair_attempt = {'provider': spec['provider'], 'model': spec['model'], 'role': 'repair', 'success': False, 'failure_type': type(repair_exc).__name__, 'error': str(repair_exc), 'latency_ms': int((time.monotonic() - rt0) * 1000)}
+                    attempts.append(repair_attempt)
+                    _log_llm_attempt({**repair_attempt, 'purpose': purpose, 'request_id': request_id})
         except Exception as exc:
-            attempts.append({'provider': spec['provider'], 'model': spec['model'], 'role': 'answer', 'success': False, 'failure_type': type(exc).__name__, 'error': str(exc), 'latency_ms': int((time.monotonic() - t0) * 1000)})
+            attempt = {'provider': spec['provider'], 'model': spec['model'], 'role': 'answer', 'success': False, 'failure_type': type(exc).__name__, 'error': str(exc), 'latency_ms': int((time.monotonic() - t0) * 1000)}
+            attempts.append(attempt)
+            _log_llm_attempt({**attempt, 'purpose': purpose, 'request_id': request_id})
 
     return {'ok': False, 'parsed': {
         'found': bool(candidate_items),
@@ -1811,7 +3775,7 @@ async def _summarize_query(query: str, items: List[SearchItem], max_sources: int
         {'role': 'user', 'content': user_prompt},
     ]
 
-    llm_result = await _run_llm_orchestrator(messages, resolved_llm, candidate_items)
+    llm_result = await _run_llm_orchestrator(messages, resolved_llm, candidate_items, purpose='search_summary')
     parsed = _adjust_summary_confidence(llm_result['parsed'], llm_result.get('attempts') or [], candidate_items, bool(llm_result.get('repaired')))
     if llm_result.get('ok'):
         _STATUS['llm_success_total'] += 1
@@ -1899,8 +3863,12 @@ def _calculate_searchbox_usage(
     scrapes_playwright: int = 0,
     llm_usage: dict | None = None
 ) -> dict:
-    search_cost = search_queries * 0.001
-    scrape_cost = (scrapes_http * 0.0) + (scrapes_playwright * 0.005)
+    is_free_advanced_source = provider in {'advanced:arxiv'}
+    is_metered_advanced_source = provider in {'advanced:auto', 'advanced:agentic_data', 'advanced:sciencestack', 'advanced:oanor', 'advanced:searchapi_scholar', 'advanced:serpapi_scholar'}
+    is_web_plus_advanced = provider.startswith('web+advanced:')
+    billable_search_queries = 1 if is_web_plus_advanced else search_queries
+    search_cost = 0.0 if (is_free_advanced_source or is_metered_advanced_source) else billable_search_queries * 0.001
+    scrape_cost = 0.0 if (is_free_advanced_source or is_metered_advanced_source) else (scrapes_http * 0.0) + (scrapes_playwright * 0.005)
     
     # Compute LLM costs using standard gpt-4o-mini rates if present
     llm_cost = 0.0
@@ -1921,7 +3889,7 @@ def _calculate_searchbox_usage(
         "llm_cost_usd": round(llm_cost, 6),
         "search_requests": search_queries,
         "scrape_fetches": scrapes_http + scrapes_playwright,
-        "cost_confidence": "estimated"
+        "cost_confidence": "unknown_external_meter" if (is_metered_advanced_source or is_web_plus_advanced) else ("exact" if is_free_advanced_source else "estimated")
     }
 
 
@@ -1943,6 +3911,94 @@ class TavilySearchResponse(BaseModel):
     _searchbox_usage: Optional[Dict[str, Any]] = None
 
 
+def _aggregate_source_block(item: SearchItem, index: int, kind: str, max_chars: int) -> str:
+    title = (item.title or 'Untitled').strip()
+    url = (item.url or item.canonical_url or '').strip()
+    provider = (item.source or item.engine or kind).strip()
+    content = (item.content or item.description or '').strip()
+    raw = (item.extracted_content or item.raw_content or '').strip()
+    body = content or raw
+    body = _truncate_payload(re.sub(r'\s+', ' ', body), max_chars)
+    parts = [f"## Source {index}: {title}"]
+    if url:
+        parts.append(f"URL: {url}")
+    parts.append(f"Type: {kind}")
+    if provider:
+        parts.append(f"Provider: {provider}")
+    if item.published:
+        parts.append(f"Published: {item.published}")
+    if body:
+        parts.append(f"Context: {body}")
+    return '\n'.join(parts).strip()
+
+
+def _build_aggregate_search_result(
+    *,
+    query: str,
+    request_id: str,
+    web_results: List[SearchItem],
+    science_results: List[SearchItem],
+    classifier_result: Dict[str, Any],
+    use_science: bool,
+) -> TavilySearchResult:
+    sections: List[str] = [
+        f"# Searchbox Research Context",
+        f"Query: {query}",
+        f"Request ID: {request_id}",
+        f"Scientific retrieval used: {'yes' if use_science else 'no'}",
+    ]
+    if classifier_result:
+        sections.append(
+            "Classifier: "
+            f"science={bool(classifier_result.get('is_science'))}, "
+            f"confidence={classifier_result.get('confidence', 0.0)}, "
+            f"reason={classifier_result.get('reason') or classifier_result.get('category') or 'n/a'}"
+        )
+
+    sections.append("\n# Web Context")
+    if web_results:
+        for idx, item in enumerate(web_results, start=1):
+            sections.append(_aggregate_source_block(item, idx, 'web', 1800))
+    else:
+        sections.append('No web results were returned.')
+
+    if use_science:
+        sections.append("\n# Scientific Context")
+        if science_results:
+            for idx, item in enumerate(science_results, start=1):
+                sections.append(_aggregate_source_block(item, idx, 'scientific', 3500))
+        else:
+            sections.append('The query was classified as scientific, but no scientific provider returned usable content.')
+
+    sources = []
+    all_items = [*web_results, *science_results]
+    for idx, item in enumerate(all_items, start=1):
+        title = (item.title or 'Untitled').strip()
+        url = (item.url or item.canonical_url or '').strip()
+        provider = (item.source or item.engine or '').strip()
+        kind = 'scientific' if item in science_results else 'web'
+        sources.append(f"{idx}. [{kind}] {title} - {url} ({provider})".strip())
+    sections.append("\n# Sources")
+    sections.append('\n'.join(sources) if sources else 'No sources returned.')
+
+    aggregate_content = _truncate_payload('\n\n'.join([s for s in sections if s]).strip(), SEARCHBOX_AGGREGATE_CONTENT_MAX_CHARS)
+
+    raw_sections: List[str] = [aggregate_content, "\n# Raw Extracted Source Text"]
+    for idx, item in enumerate(all_items, start=1):
+        raw = (item.extracted_content or item.raw_content or item.content or item.description or '').strip()
+        if raw:
+            raw_sections.append(f"\n## Raw Source {idx}: {item.title or item.url or 'Untitled'}\n{raw}")
+    aggregate_raw = _truncate_payload('\n'.join(raw_sections).strip(), SEARCHBOX_AGGREGATE_RAW_CONTENT_MAX_CHARS)
+
+    return TavilySearchResult(
+        title=f"Searchbox research context for: {query}",
+        url=f"searchbox://aggregate/{request_id}",
+        content=aggregate_content,
+        raw_content=aggregate_raw,
+        score=1.0,
+    )
+
+
 @app.post('/search')
 async def search(req: SearchRequest, authorization: Optional[str] = Header(default=None)):
     _authorize(authorization, req.api_key)
@@ -1950,11 +4006,16 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     t0 = datetime.now()
     request_id = str(uuid.uuid4())
     
-    max_results = req.max_results or req.count or 5
+    requested_results = req.max_results or req.count or 1
+    max_results = 1
+    web_context_count = min(SERPER_MAX_COUNT, max(SEARCHBOX_WEB_CONTEXT_RESULTS, int(requested_results or 1)))
     search_req = SearchRequest(**_model_dict(req))
-    search_req.count = max_results
-    search_req.max_results = max_results
-    
+    search_req.count = web_context_count
+    search_req.max_results = web_context_count
+    # advanced_search=true is retained as a compatibility force-science override.
+    # advanced_search=false/no field no longer disables science detection.
+    forced_science = bool(search_req.advanced_search is True)
+
     answer_requested = _boolish(req.include_answer, default=False)
     if answer_requested:
         search_req.include_content = True
@@ -1963,7 +4024,28 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         if search_req.summarize_top_n is None:
             search_req.summarize_top_n = max_results
             
-    results = await _run_search(search_req)
+    web_req = SearchRequest(**_model_dict(search_req))
+    web_req.advanced_search = False
+    web_req.topic = req.topic
+    web_req.include_content = True
+    web_req.fetch_top_n = web_context_count
+    web_req.count = web_context_count
+    web_req.max_results = web_context_count
+    web_results = await _run_search(web_req)
+    classifier_result = {'is_science': True, 'confidence': 1.0, 'reason': 'advanced_search_force_override'} if forced_science else await _classify_science_query(req.query, req.llm_options, request_id=request_id)
+    use_science = bool(classifier_result.get('is_science'))
+    if use_science:
+        science_req = SearchRequest(**_model_dict(search_req))
+        science_req.advanced_search = True
+        science_req.topic = 'auto'
+        science_count = max(ADVANCED_SEARCH_AUTO_MIN_PROVIDERS, 2)
+        science_req.count = science_count
+        science_req.max_results = science_count
+        advanced_results = await _run_advanced_search(science_req)
+    else:
+        advanced_results = []
+    search_req.advanced_search = use_science
+    results = web_results + advanced_results
     
     summary_payload = None
     answer = None
@@ -1979,33 +4061,30 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         )
         answer = summary_payload.get('answer') if isinstance(summary_payload, dict) else None
 
-    scrapes_http = len([r for r in results if r.scraped and r.extract_method != "playwright_fallback"])
+    scrapes_http = len([r for r in results if r.scraped and r.extract_method != "playwright_fallback" and not (r.source in {'arxiv', 'agentic_data', 'sciencestack', 'oanor', 'searchapi_scholar', 'serpapi_scholar'})])
     scrapes_pw = len([r for r in results if r.scraped and r.extract_method == "playwright_fallback"])
     llm_usage = summary_payload.get('model_usage') if summary_payload else None
-    
+    usage_provider = (f'web+advanced:{_resolve_advanced_source(search_req)}' if use_science else SEARCH_PROVIDER)
     usage = _calculate_searchbox_usage(
-        provider=SEARCH_PROVIDER,
-        search_queries=1 if results else 0,
+        provider=usage_provider,
+        search_queries=(1 + (1 if use_science else 0)) if results else 0,
         scrapes_http=scrapes_http,
         scrapes_playwright=scrapes_pw,
         llm_usage=llm_usage
     )
     
-    tavily_results = []
-    for r in results[:max_results]:
-        content = r.content or r.description or ""
-        raw_content = None
-        if req.include_raw_content:
-            raw_content = r.extracted_content or r.raw_content or content
-            
-        tavily_results.append(TavilySearchResult(
-            title=r.title or "",
-            url=r.url or "",
-            content=content,
-            raw_content=raw_content,
-            score=r.score or 0.0
-        ))
-        
+    aggregate_result = _build_aggregate_search_result(
+        query=req.query,
+        request_id=request_id,
+        web_results=web_results,
+        science_results=advanced_results,
+        classifier_result=classifier_result,
+        use_science=use_science,
+    )
+    if not (req.include_raw_content or use_science):
+        aggregate_result.raw_content = None
+    tavily_results = [aggregate_result]
+    
     global_images: List[Dict[str, Any]] = []
     if req.include_images:
         for item in results:
@@ -2055,6 +4134,7 @@ async def search_get(
     include_answer: bool = False,
     include_images: bool = False,
     include_raw_content: bool = False,
+    advanced_search: bool = False,
     include_domains: Optional[str] = None,
     exclude_domains: Optional[str] = None,
     authorization: Optional[str] = Header(default=None)
@@ -2071,6 +4151,7 @@ async def search_get(
         include_answer=include_answer,
         include_images=include_images,
         include_raw_content=include_raw_content,
+        advanced_search=advanced_search,
         include_domains=inc_domains,
         exclude_domains=exc_domains,
     )
@@ -2158,8 +4239,28 @@ async def search_summary(req: SearchSummaryRequest, authorization: Optional[str]
         debug=req.debug,
         response_mode=req.response_mode,
         llm_options=req.llm_options,
+        advanced_search=req.advanced_search,
     )
-    results = await _run_search(req_search)
+    if req_search.advanced_search:
+        web_req = SearchRequest(**_model_dict(req_search))
+        web_req.advanced_search = False
+        web_req.topic = req.topic
+        web_results = await _run_search(web_req)
+        science_req = SearchRequest(**_model_dict(req_search))
+        science_req.advanced_search = True
+        science_req.topic = 'auto'
+        results = web_results + await _run_advanced_search(science_req)
+    else:
+        web_results = await _run_search(req_search)
+        classifier_result = await _classify_science_query(req.query, req.llm_options, request_id=str(uuid.uuid4()))
+        if classifier_result.get('is_science'):
+            science_req = SearchRequest(**_model_dict(req_search))
+            science_req.advanced_search = True
+            science_req.topic = 'auto'
+            results = web_results + await _run_advanced_search(science_req)
+            req_search.advanced_search = True
+        else:
+            results = web_results
     max_sources = _resolve_summarize_top_n(req)
 
     if _resolve_include_answer(req, default=True):
@@ -2192,7 +4293,7 @@ async def search_summary(req: SearchSummaryRequest, authorization: Optional[str]
                     global_images.append(img)
 
     return SearchSummaryResponse(
-        provider=SEARCH_PROVIDER,
+        provider=(f'web+advanced:{_resolve_advanced_source(req_search)}' if req_search.advanced_search else SEARCH_PROVIDER),
         request_id=str(uuid.uuid4()),
         query=req.query,
         results_count=len(results),

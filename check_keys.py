@@ -1,6 +1,22 @@
+from pathlib import Path
 import os
-from dotenv import load_dotenv
-load_dotenv('/home/ubuntu/APICostX-Searchbox/.env')
-for k, v in os.environ.items():
-    if 'API_KEY' in k or 'PROVIDER' in k or 'DISABLED' in k:
-        print(k, len(v))
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+
+if load_dotenv:
+    load_dotenv(Path(__file__).resolve().parent / '.env')
+
+for name in (
+    'SERPER_API_KEY',
+    'BRAVE_API_KEY',
+    'SCIENCESTACK_API_KEY',
+    'SEARCHAPI_API_KEY',
+    'SERPAPI_API_KEY',
+    'AGENTIC_DATA_API_KEY',
+    'OANOR_API_KEY',
+):
+    print(f'{name}: {'configured' if os.environ.get(name) else 'missing'}')
