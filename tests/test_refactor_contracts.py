@@ -114,3 +114,30 @@ def test_web_provider_parsers_are_available():
     assert rows[0]["source"] == "serper"
     assert rows[0]["url"] == "https://example.com"
     assert WebSearchOptions(query="query", count=1).query == "query"
+
+def test_auth_module_preserves_status_codes():
+    from searchbox.auth import AuthSettings, auth_key_from_header_or_key
+
+    disabled = AuthSettings(auth_disabled=True, search_api_key="")
+    assert auth_key_from_header_or_key(None, settings=disabled) == "anonymous"
+
+    enabled = AuthSettings(auth_disabled=False, search_api_key="secret")
+    assert auth_key_from_header_or_key("Bearer secret", settings=enabled) == "authorized"
+    with pytest.raises(HTTPException) as missing:
+        auth_key_from_header_or_key(None, settings=enabled)
+    assert missing.value.status_code == 401
+    with pytest.raises(HTTPException) as invalid:
+        auth_key_from_header_or_key("Bearer wrong", settings=enabled)
+    assert invalid.value.status_code == 403
+
+
+def test_rate_limiter_enforces_minute_bucket():
+    from searchbox.rate_limit import InMemoryRateLimiter
+
+    now = 1000.0
+    limiter = InMemoryRateLimiter(clock=lambda: now)
+    limiter.check("bucket", 2)
+    limiter.check("bucket", 2)
+    with pytest.raises(HTTPException) as exc:
+        limiter.check("bucket", 2)
+    assert exc.value.status_code == 429

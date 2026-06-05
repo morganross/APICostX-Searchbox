@@ -4,7 +4,6 @@ import os
 import re
 import time
 import uuid
-from collections import defaultdict, deque
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
@@ -15,6 +14,8 @@ import xml.etree.ElementTree as ET
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from searchbox.auth import AuthSettings, auth_key_from_header_or_key
+from searchbox.rate_limit import InMemoryRateLimiter
 from searchbox.extraction import (
     PLAYWRIGHT_AVAILABLE as _PLAYWRIGHT_AVAILABLE,
     ExtractionSettings,
@@ -210,7 +211,7 @@ LLM_API_KEY = os.environ.get('LLM_API_KEY', '').strip() or None
 LLM_PROVIDER_KEY = os.environ.get('LLM_PROVIDER_KEY', '').strip() or None
 
 
-_RATE_BUCKETS: Dict[str, deque] = defaultdict(deque)
+_RATE_LIMITER = InMemoryRateLimiter()
 _ARXIV_REQUEST_LOCK = asyncio.Lock()
 _ARXIV_LAST_REQUEST_AT = 0.0
 _ARXIV_COOLDOWN_UNTIL = 0.0
@@ -420,36 +421,16 @@ def get_provider_event_logs(limit: int = 100, authorization: Optional[str] = Hea
     return {'log': 'provider_events', 'count': min(max(int(limit or 100), 1), SEARCHBOX_LOG_API_MAX_LINES), 'events': _tail_jsonl(PROVIDER_EVENT_LOG_FILE, limit)}
 
 
+def _auth_settings() -> AuthSettings:
+    return AuthSettings(auth_disabled=AUTH_DISABLED, search_api_key=SEARCH_API_KEY)
+
+
 def _auth_key_from_header_or_key(authorization: Optional[str], api_key: Optional[str] = None) -> str:
-    if AUTH_DISABLED:
-        return 'anonymous'
-    token = None
-    if authorization and authorization.startswith('Bearer '):
-        token = authorization[len('Bearer '):].strip()
-    elif api_key:
-        token = api_key.strip()
-
-    if not token:
-        raise HTTPException(status_code=401, detail='Missing API key or bearer token')
-
-    if not SEARCH_API_KEY:
-        raise HTTPException(status_code=503, detail='SEARCH_API_KEY is not configured')
-
-    if token != SEARCH_API_KEY:
-        raise HTTPException(status_code=403, detail='Invalid API key')
-    return 'authorized'
+    return auth_key_from_header_or_key(authorization, api_key, settings=_auth_settings())
 
 
 def _check_rate_limit(bucket_key: str) -> None:
-    if RATE_LIMIT_PER_MINUTE <= 0:
-        return
-    now = time.time()
-    bucket = _RATE_BUCKETS[bucket_key]
-    while bucket and bucket[0] <= now - 60:
-        bucket.popleft()
-    if len(bucket) >= RATE_LIMIT_PER_MINUTE:
-        raise HTTPException(status_code=429, detail='Rate limit exceeded')
-    bucket.append(now)
+    _RATE_LIMITER.check(bucket_key, RATE_LIMIT_PER_MINUTE)
 
 
 def _authorize(authorization: Optional[str], api_key: Optional[str] = None) -> None:
