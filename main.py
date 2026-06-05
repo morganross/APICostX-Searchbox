@@ -48,6 +48,25 @@ from searchbox.urls import (
     favicon_for_url as _favicon_for_url,
     validate_fetch_url,
 )
+from searchbox.search_options import (
+    resolve_brave_safesearch,
+    resolve_country,
+    resolve_debug,
+    resolve_freshness,
+    resolve_include_answer,
+    resolve_include_content,
+    resolve_max_chars_per_source,
+    resolve_max_results,
+    resolve_search_depth,
+    resolve_searxng_safesearch,
+    resolve_serper_tbs,
+    resolve_summarize_top_n,
+    resolve_timeout,
+    resolve_unused_results,
+    split_result_buckets,
+    resolve_searxng_time_range,
+)
+from searchbox.scoring import score_item as _score_item
 try:
     from litellm import completion as llm_completion
     _LITELLM_AVAILABLE = True
@@ -470,255 +489,69 @@ def _log_provider_event(event: Dict[str, Any]) -> None:
 
 
 
+
 def _resolve_max_results(req: Any) -> int:
-    value = getattr(req, 'max_results', None)
-    if value is None:
-        value = getattr(req, 'count', SERPER_DEFAULT_COUNT)
-    return _bounded_int(value, SERPER_DEFAULT_COUNT, 0, SERPER_MAX_COUNT)
+    return resolve_max_results(req=req, default_count=SERPER_DEFAULT_COUNT, max_count=SERPER_MAX_COUNT)
 
 
 def _resolve_include_content(req: Any, default: bool = False) -> bool:
-    mode = (getattr(req, 'response_mode', None) or '').strip().lower()
-    if mode in ('search_with_content', 'search_with_answer', 'answer', 'debug'):
-        return True
-    if bool(getattr(req, 'include_content', default)):
-        return True
-    include_raw = getattr(req, 'include_raw_content', None)
-    if include_raw is not None:
-        return _boolish(include_raw, default=False)
-    return False
+    return resolve_include_content(req=req, default=default)
 
 
 def _resolve_include_answer(req: Any, default: bool = False) -> bool:
-    mode = (getattr(req, 'response_mode', None) or '').strip().lower()
-    if mode in ('search_only', 'search_with_content'):
-        return False
-    if mode in ('search_with_answer', 'answer', 'debug'):
-        return True
-    return _boolish(getattr(req, 'include_answer', None), default=default)
+    return resolve_include_answer(req=req, default=default)
 
 
 def _resolve_debug(req: Any) -> bool:
-    mode = (getattr(req, 'response_mode', None) or '').strip().lower()
-    return bool(getattr(req, 'debug', False) or mode == 'debug')
+    return resolve_debug(req)
 
 
 def _resolve_unused_results(items: List[SearchItem], max_sources: int) -> List[SearchItem]:
-    usable_seen = 0
-    unused: List[SearchItem] = []
-    for item in items:
-        if item.url and item.scraped and item.content and usable_seen < max_sources:
-            usable_seen += 1
-            continue
-        unused.append(item)
-    return unused
-
-
-def _split_result_buckets(items: List[SearchItem], max_sources: int) -> Dict[str, List[SearchItem]]:
-    used = 0
-    not_summarized: List[SearchItem] = []
-    excluded: List[SearchItem] = []
-    for item in items:
-        usable = bool(item.url and item.scraped and item.content)
-        if usable and used < max_sources:
-            used += 1
-        elif usable:
-            not_summarized.append(item)
-        else:
-            excluded.append(item)
-    return {'not_summarized': not_summarized, 'excluded_results': excluded}
-
-
-async def _normalize_search_query(req: Any) -> str:
-    query = (getattr(req, 'query', '') or '').strip()
-    if getattr(req, 'exact_match', False) and query and not (query.startswith('"') and query.endswith('"')):
-        query = f'"{query}"'
-
-    import re
-    operators = re.findall(r'(?:OR\s+)?(?:site|date|filetype|ext):[^\s]+', query)
-
-    base_query = query
-    for op in operators:
-        base_query = base_query.replace(op, '')
-
-    base_query = re.sub(r'\s+', ' ', base_query).strip()
-
-    words = base_query.split()
-    if len(words) <= 15:
-        return query
-
-    if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE:
-        try:
-            resolved_llm = _resolve_llm_options(getattr(req, 'llm_options', None))
-            system_prompt = "You are an expert Google Search query optimizer. Convert the user's verbose paragraph into an extremely dense 5-10 keyword Google Search query. Do not generalize or simplify; be extra specific, and focus heavily on the last part of the search query. Return ONLY a single JSON object with the structure: {\"query\": \"optimized keywords\"}. Do not use markdown or extra text."
-            messages = [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': base_query}
-            ]
-            for spec in _build_llm_candidate_specs(resolved_llm):
-                try:
-                    attempt_timeout = min(float(resolved_llm.get('timeout', 3.0)), 3.0)
-                    llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=attempt_timeout)
-                    payload = _extract_llm_response_payload(llm_resp)
-                    parsed = _extract_json_from_text(payload.get('raw') or '')
-                    if parsed and isinstance(parsed, dict) and parsed.get('query'):
-                        opt_query = str(parsed['query']).strip()
-                        final_query = opt_query
-                        if operators:
-                            final_query += ' ' + ' '.join(operators)
-                        return final_query.strip()
-                except Exception as inner_e:
-                    import traceback
-                    print("LLM QUERY MAKER INNER FAILED:", repr(inner_e))
-                    traceback.print_exc()
-                    continue
-        except Exception as e:
-            import traceback
-            print("LLM QUERY MAKER FAILED:", repr(e))
-            traceback.print_exc()
-            pass
-
-    base_query = ' '.join(words[:20])
-    base_query = re.sub(r'\s+OR$', '', base_query)
-    if base_query.count('"') % 2 != 0:
-        base_query += '"'
-    open_p = base_query.count('(')
-    close_p = base_query.count(')')
-    if open_p > close_p:
-        base_query += ')' * (open_p - close_p)
-
-    final_query = base_query
-    if operators:
-        final_query += ' ' + ' '.join(operators)
-
-    return final_query.strip()
+    return resolve_unused_results(items=items, max_sources=max_sources)
 
 
 def _resolve_country(req: Any) -> Optional[str]:
-    country = (getattr(req, 'country', None) or '').strip()
-    if not country:
-        return None
-    return country[:2].upper()
+    return resolve_country(req)
 
 
 def _resolve_brave_safesearch(req: Any) -> str:
-    return 'strict' if getattr(req, 'safe_search', False) else 'moderate'
+    return resolve_brave_safesearch(req)
 
 
 def _resolve_searxng_safesearch(req: Any) -> int:
-    return 1 if getattr(req, 'safe_search', False) else 0
+    return resolve_searxng_safesearch(req)
 
 
 def _resolve_freshness(req: Any) -> Optional[str]:
-    start_date = (getattr(req, 'start_date', None) or '').strip()
-    end_date = (getattr(req, 'end_date', None) or '').strip()
-    if start_date and end_date:
-        return f'{start_date}to{end_date}'
-
-    value = (getattr(req, 'time_range', None) or '').strip().lower()
-    mapping = {
-        'day': 'pd',
-        'd': 'pd',
-        '24h': 'pd',
-        'week': 'pw',
-        'w': 'pw',
-        '7d': 'pw',
-        'month': 'pm',
-        'm': 'pm',
-        '31d': 'pm',
-        'year': 'py',
-        'y': 'py',
-        '365d': 'py',
-    }
-    return mapping.get(value)
+    return resolve_freshness(req)
 
 
 def _resolve_searxng_time_range(req: Any) -> Optional[str]:
-    value = (getattr(req, 'time_range', None) or '').strip().lower()
-    mapping = {
-        'day': 'day',
-        'd': 'day',
-        '24h': 'day',
-        'month': 'month',
-        'm': 'month',
-        '31d': 'month',
-        'year': 'year',
-        'y': 'year',
-        '365d': 'year',
-    }
-    return mapping.get(value)
+    return resolve_searxng_time_range(req)
 
 
 def _resolve_serper_tbs(req: Any) -> Optional[str]:
-    days = getattr(req, 'days', None)
-    if days:
-        return f'qdr:d{int(days)}'
-    start_date = (getattr(req, 'start_date', None) or '').strip()
-    end_date = (getattr(req, 'end_date', None) or '').strip()
-    if start_date and end_date:
-        return f'cdr:1,cd_min:{start_date},cd_max:{end_date}'
-
-    value = (getattr(req, 'time_range', None) or '').strip().lower()
-    mapping = {
-        'day': 'qdr:d',
-        'd': 'qdr:d',
-        '24h': 'qdr:d',
-        'week': 'qdr:w',
-        'w': 'qdr:w',
-        '7d': 'qdr:w',
-        'month': 'qdr:m',
-        'm': 'qdr:m',
-        '31d': 'qdr:m',
-        'year': 'qdr:y',
-        'y': 'qdr:y',
-        '365d': 'qdr:y',
-    }
-    return mapping.get(value)
+    return resolve_serper_tbs(req)
 
 
 def _resolve_search_depth(req: Any) -> str:
-    depth = (getattr(req, 'search_depth', None) or 'basic').strip().lower()
-    return depth if depth else 'basic'
+    return resolve_search_depth(req)
 
 
 def _resolve_summarize_top_n(req: Any, default: int = 5) -> int:
-    return _bounded_int(getattr(req, 'summarize_top_n', None), default, 1, SERPER_MAX_COUNT)
+    return resolve_summarize_top_n(req=req, default=default, max_count=SERPER_MAX_COUNT)
 
 
 def _resolve_max_chars_per_source(req: Any, default: int = 4000) -> int:
-    explicit = getattr(req, 'max_chars_per_source', None)
-    if explicit is not None:
-        return _bounded_int(explicit, default, 500, 16000)
-    chunks = getattr(req, 'chunks_per_source', None)
-    if chunks is not None:
-        return _bounded_int(chunks, 3, 1, 5) * 500
-    return default
+    return resolve_max_chars_per_source(req=req, default=default)
 
 
 def _resolve_timeout(req: Any) -> float:
-    return float(getattr(req, 'timeout', None) or REQUEST_TIMEOUT)
+    return resolve_timeout(req=req, default=REQUEST_TIMEOUT)
 
 
-
-
-
-
-def _score_item(item: SearchItem, query: str) -> float:
-    score = max(0.0, 1.0 - ((max(item.rank, 1) - 1) * 0.05))
-    haystack = f'{item.title} {item.description} {item.content or ""}'.lower()
-    terms = [t for t in re.findall(r'[a-z0-9]+', query.lower()) if len(t) > 2]
-    if terms:
-        score += min(0.3, sum(1 for t in terms if t in haystack) / len(terms) * 0.3)
-    if item.scraped:
-        score += 0.2
-    if item.content_chars:
-        score += min(0.2, item.content_chars / 10000 * 0.2)
-    if item.published:
-        score += 0.05
-    return round(min(score, 1.0), 4)
-
-
-
+def _split_result_buckets(items: List[SearchItem], max_sources: int) -> Dict[str, List[SearchItem]]:
+    return split_result_buckets(items=items, max_sources=max_sources)
 
 def _validate_fetch_url(url: str) -> None:
     validate_fetch_url(url, block_private_fetch_ips=BLOCK_PRIVATE_FETCH_IPS)
