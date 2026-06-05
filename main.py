@@ -1,10 +1,8 @@
 import asyncio
 import fcntl
-import ipaddress
 import json
 import os
 import re
-import socket
 import time
 import uuid
 from collections import defaultdict, deque
@@ -19,6 +17,18 @@ import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from searchbox.text import (
+    boolish as _boolish,
+    bounded_int as _bounded_int,
+    chunk_text as _chunk_text,
+    model_dict as _model_dict,
+    shorten as _shorten,
+)
+from searchbox.urls import (
+    domain_allowed as _domain_allowed,
+    favicon_for_url as _favicon_for_url,
+    validate_fetch_url,
+)
 try:
     import trafilatura
 except Exception:
@@ -504,30 +514,12 @@ def _summarize_events(events: List[Dict[str, Any]], group_fields: List[str]) -> 
     return summary
 
 
-def _shorten(text: str, max_chars: int) -> str:
-    return (text or '')[:max_chars]
 
 
-def _boolish(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() not in ('', '0', 'false', 'no', 'off', 'none')
-    return bool(value)
 
 
-def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
 
 
-def _model_dict(model: Any) -> Dict[str, Any]:
-    return model.model_dump() if hasattr(model, 'model_dump') else model.dict()
 
 
 def _resolve_max_results(req: Any) -> int:
@@ -759,26 +751,8 @@ def _resolve_timeout(req: Any) -> float:
     return float(getattr(req, 'timeout', None) or REQUEST_TIMEOUT)
 
 
-def _favicon_for_url(url: str) -> Optional[str]:
-    host = (urlparse(url or '').netloc or '').lower()
-    if not host:
-        return None
-    return f'https://www.google.com/s2/favicons?domain={host}&sz=64'
 
 
-def _chunk_text(text: str, chunks_per_source: Optional[int]) -> str:
-    if not text:
-        return ''
-    count = _bounded_int(chunks_per_source, 3, 1, 5) if chunks_per_source else 1
-    chunks = []
-    cleaned = re.sub(r'\s+', ' ', text).strip()
-    for idx in range(count):
-        start = idx * 500
-        chunk = cleaned[start:start + 500].strip()
-        if not chunk:
-            break
-        chunks.append(f'<chunk {idx + 1}> {chunk}')
-    return ' [...] '.join(chunks)
 
 
 def _score_item(item: SearchItem, query: str) -> float:
@@ -796,39 +770,12 @@ def _score_item(item: SearchItem, query: str) -> float:
     return round(min(score, 1.0), 4)
 
 
-def _is_private_ip(ip_text: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(ip_text)
-    except ValueError:
-        return True
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
 
 
 def _validate_fetch_url(url: str) -> None:
-    parsed = urlparse(url or '')
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-        raise HTTPException(status_code=400, detail=f'Unsafe URL scheme or host: {url}')
-    if not BLOCK_PRIVATE_FETCH_IPS:
-        return
-    try:
-        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise HTTPException(status_code=400, detail=f'Could not resolve URL host: {parsed.hostname}') from exc
-    for info in infos:
-        if _is_private_ip(info[4][0]):
-            raise HTTPException(status_code=400, detail=f'Blocked private or unsafe fetch host: {parsed.hostname}')
+    validate_fetch_url(url, block_private_fetch_ips=BLOCK_PRIVATE_FETCH_IPS)
 
 
-def _domain_allowed(url: str, include_domains: List[str], exclude_domains: List[str]) -> bool:
-    host = (urlparse(url or '').netloc or '').lower()
-    host = host[4:] if host.startswith('www.') else host
-    includes = [d.lower().removeprefix('www.') for d in include_domains or [] if d]
-    excludes = [d.lower().removeprefix('www.') for d in exclude_domains or [] if d]
-    if includes and not any(host == d or host.endswith('.' + d) for d in includes):
-        return False
-    if excludes and any(host == d or host.endswith('.' + d) for d in excludes):
-        return False
-    return True
 
 
 def _forced_int(value: Optional[str]) -> Optional[int]:
