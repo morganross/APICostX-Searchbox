@@ -1,5 +1,4 @@
 import asyncio
-import fcntl
 import json
 import os
 import re
@@ -238,10 +237,8 @@ from searchbox.logging_utils import (  # noqa: E402
     summarize_events as _summarize_events,
     tail_jsonl as _tail_jsonl,
 )
-from searchbox.state.json_store import (  # noqa: E402
-    read_json_file_locked as _read_json_file_locked,
-    write_json_file_locked as _write_json_file_locked,
-)
+from searchbox.state import cooldown as cooldown_state  # noqa: E402
+from searchbox.state import quota as quota_state  # noqa: E402
 from searchbox.defaults import BRAVE_DEFAULT_COUNT, BRAVE_MAX_COUNT, SERPER_DEFAULT_COUNT, SERPER_MAX_COUNT  # noqa: E402
 from searchbox.models import (  # noqa: E402,F401
     ImageItem,
@@ -1223,94 +1220,41 @@ def _advanced_provider_names() -> List[str]:
 
 
 def _advanced_provider_base_cooldown_seconds(provider: str, status_code: int) -> int:
-    if status_code == 402:
-        return 86400
-    if status_code == 429:
-        return 900 if provider != 'arxiv' else int(ARXIV_COOLDOWN_SECONDS)
-    if status_code == 503:
-        return 900
-    if status_code in (502, 504):
-        return 300
-    return 120
+    return cooldown_state.base_cooldown_seconds(
+        provider,
+        status_code,
+        arxiv_cooldown_seconds=ARXIV_COOLDOWN_SECONDS,
+    )
 
 
 def _advanced_provider_cooldown_snapshot() -> Dict[str, Any]:
-    now = time.time()
-    data = _read_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE)
-    snapshot = {}
-    for provider in _advanced_provider_names():
-        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
-        until = float(entry.get('cooldown_until_epoch') or 0)
-        remaining = max(0, int(round(until - now)))
-        snapshot[provider] = {
-            'cooling_down': remaining > 0,
-            'retry_after_seconds': remaining,
-            'failure_count': int(entry.get('failure_count') or 0),
-            'last_status_code': entry.get('last_status_code'),
-            'last_reason': entry.get('last_reason'),
-            'last_failure_at': entry.get('last_failure_at'),
-        }
-    return snapshot
+    return cooldown_state.snapshot(ADVANCED_PROVIDER_COOLDOWN_FILE, _advanced_provider_names())
 
 
 def _advanced_provider_cooldown_remaining(provider: str) -> int:
-    entry = _advanced_provider_cooldown_snapshot().get(provider) or {}
-    return int(entry.get('retry_after_seconds') or 0)
+    return cooldown_state.remaining(ADVANCED_PROVIDER_COOLDOWN_FILE, _advanced_provider_names(), provider)
 
 
 def _raise_if_advanced_provider_cooling(provider: str) -> None:
-    remaining = _advanced_provider_cooldown_remaining(provider)
-    if remaining > 0:
-        raise HTTPException(status_code=429, detail={
-            'source': provider,
-            'reason': 'advanced_provider_cooldown_active',
-            'message': f'{provider} is cooling down locally after a recent provider failure.',
-            'retry_after_seconds': remaining,
-        }, headers={'Retry-After': str(remaining)})
+    cooldown_state.raise_if_cooling(ADVANCED_PROVIDER_COOLDOWN_FILE, _advanced_provider_names(), provider)
 
 
 def _mark_advanced_provider_success(provider: str) -> None:
-    _log_provider_event({'event': 'success', 'provider': provider, 'success': True})
-    def mutate(data: Dict[str, Any]) -> Dict[str, Any]:
-        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
-        entry.update({
-            'cooldown_until_epoch': 0,
-            'failure_count': 0,
-            'last_success_at': datetime.utcnow().isoformat() + 'Z',
-        })
-        data[provider] = entry
-        return entry
-    _write_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE, mutate)
+    cooldown_state.mark_success(ADVANCED_PROVIDER_COOLDOWN_FILE, provider, _log_provider_event)
 
 
 def _mark_advanced_provider_failure(provider: str, status_code: int, reason: str, retry_after: Optional[int] = None) -> int:
-    now = time.time()
-    def mutate(data: Dict[str, Any]) -> Dict[str, Any]:
-        entry = data.get(provider) if isinstance(data.get(provider), dict) else {}
-        failure_count = int(entry.get('failure_count') or 0) + 1
-        base = int(retry_after) if retry_after is not None else _advanced_provider_base_cooldown_seconds(provider, status_code)
-        cooldown = min(ADVANCED_PROVIDER_COOLDOWN_MAX_SECONDS, max(30, base * (2 ** max(0, failure_count - 1))))
-        entry.update({
-            'cooldown_until_epoch': now + cooldown,
-            'failure_count': failure_count,
-            'last_status_code': status_code,
-            'last_reason': reason,
-            'last_failure_at': datetime.utcnow().isoformat() + 'Z',
-        })
-        data[provider] = entry
-        return {'retry_after_seconds': int(cooldown), 'failure_count': failure_count}
-    result = _write_json_file_locked(ADVANCED_PROVIDER_COOLDOWN_FILE, mutate)
-    retry_seconds = int(result.get('retry_after_seconds') or _advanced_provider_base_cooldown_seconds(provider, status_code))
-    _log_provider_event({
-        'event': 'failure',
-        'provider': provider,
-        'success': False,
-        'status_code': status_code,
-        'reason': reason,
-        'retry_after_seconds': retry_seconds,
-        'failure_count': result.get('failure_count'),
-    })
-    return retry_seconds
+    return cooldown_state.mark_failure(
+        ADVANCED_PROVIDER_COOLDOWN_FILE,
+        provider,
+        status_code,
+        reason,
+        max_cooldown_seconds=ADVANCED_PROVIDER_COOLDOWN_MAX_SECONDS,
+        arxiv_cooldown_seconds=ARXIV_COOLDOWN_SECONDS,
+        log_event=_log_provider_event,
+        retry_after=retry_after,
+    )
+
 
 def _advanced_provider_daily_limits() -> Dict[str, int]:
     return {
@@ -1324,7 +1268,7 @@ def _advanced_provider_daily_limits() -> Dict[str, int]:
 
 
 def _advanced_provider_quota_day() -> str:
-    return datetime.utcnow().strftime('%Y-%m-%d')
+    return quota_state.quota_day()
 
 
 def _advanced_provider_monthly_limits() -> Dict[str, int]:
@@ -1334,160 +1278,43 @@ def _advanced_provider_monthly_limits() -> Dict[str, int]:
 
 
 def _advanced_provider_quota_month() -> str:
-    return datetime.utcnow().strftime('%Y-%m')
+    return quota_state.quota_month()
 
 
 def _advanced_provider_monthly_quota_paths() -> tuple[str, str]:
-    quota_file = ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE
-    quota_dir = os.path.dirname(quota_file) or '.'
-    os.makedirs(quota_dir, exist_ok=True)
-    return quota_file, quota_file + '.lock'
+    return (ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE, ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE + '.lock')
 
 
 def _advanced_provider_monthly_quota_snapshot() -> Dict[str, Any]:
-    quota_file, _ = _advanced_provider_monthly_quota_paths()
-    month = _advanced_provider_quota_month()
-    limits = _advanced_provider_monthly_limits()
-    try:
-        with open(quota_file, 'r', encoding='utf-8') as fh:
-            data = json.load(fh)
-    except Exception:
-        data = {}
-    counts = data.get(month) if isinstance(data.get(month), dict) else {}
-    return {
-        provider: {
-            'used': int(counts.get(provider, 0) or 0),
-            'limit': int(limit),
-            'remaining': max(0, int(limit) - int(counts.get(provider, 0) or 0)),
-        }
-        for provider, limit in limits.items()
-    }
+    return quota_state.monthly_snapshot(ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE, _advanced_provider_monthly_limits())
 
 
 def _reserve_advanced_provider_monthly_quota(provider: str, units: int = 1) -> None:
-    units = max(1, int(units or 1))
-    limits = _advanced_provider_monthly_limits()
-    if provider not in limits:
-        return
-    limit = int(limits.get(provider, 0) or 0)
-    if limit <= 0:
-        raise HTTPException(status_code=429, detail={
-            'source': provider,
-            'reason': 'advanced_provider_disabled_by_monthly_limit',
-            'message': f'{provider} monthly request limit is disabled or set to zero.',
-            'monthly_limit': limit,
-            'used_this_month': 0,
-            'requested_units': units,
-        })
-    quota_file, lock_file = _advanced_provider_monthly_quota_paths()
-    month = _advanced_provider_quota_month()
-    now = datetime.utcnow()
-    next_month = datetime(now.year + (1 if now.month == 12 else 0), 1 if now.month == 12 else now.month + 1, 1)
-    retry_after = max(1, int((next_month - now).total_seconds()))
-    with open(lock_file, 'a+', encoding='utf-8') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            try:
-                with open(quota_file, 'r', encoding='utf-8') as fh:
-                    data = json.load(fh)
-            except Exception:
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
-            data = {month: data.get(month, {}) if isinstance(data.get(month), dict) else {}}
-            used = int(data[month].get(provider, 0) or 0)
-            if used + units > limit:
-                raise HTTPException(status_code=429, detail={
-                    'source': provider,
-                    'reason': 'advanced_provider_monthly_limit_reached',
-                    'message': f'{provider} monthly provider limit reached inside Searchbox.',
-                    'monthly_limit': limit,
-                    'used_this_month': used,
-                    'requested_units': units,
-                    'retry_after_seconds': retry_after,
-                }, headers={'Retry-After': str(retry_after)})
-            data[month][provider] = used + units
-            tmp_file = quota_file + '.tmp'
-            with open(tmp_file, 'w', encoding='utf-8') as fh:
-                json.dump(data, fh, sort_keys=True)
-            os.replace(tmp_file, quota_file)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    quota_state.reserve_monthly(
+        provider,
+        ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE,
+        _advanced_provider_monthly_limits(),
+        units,
+    )
 
 
 def _advanced_provider_quota_paths() -> tuple[str, str]:
-    quota_file = ADVANCED_PROVIDER_QUOTA_FILE
-    quota_dir = os.path.dirname(quota_file) or '.'
-    os.makedirs(quota_dir, exist_ok=True)
-    return quota_file, quota_file + '.lock'
+    return (ADVANCED_PROVIDER_QUOTA_FILE, ADVANCED_PROVIDER_QUOTA_FILE + '.lock')
 
 
 def _advanced_provider_quota_snapshot() -> Dict[str, Any]:
-    quota_file, _ = _advanced_provider_quota_paths()
-    day = _advanced_provider_quota_day()
-    limits = _advanced_provider_daily_limits()
-    try:
-        with open(quota_file, 'r', encoding='utf-8') as fh:
-            data = json.load(fh)
-    except Exception:
-        data = {}
-    counts = data.get(day) if isinstance(data.get(day), dict) else {}
-    return {
-        provider: {
-            'used': int(counts.get(provider, 0) or 0),
-            'limit': int(limit),
-            'remaining': max(0, int(limit) - int(counts.get(provider, 0) or 0)),
-        }
-        for provider, limit in limits.items()
-    }
+    return quota_state.daily_snapshot(ADVANCED_PROVIDER_QUOTA_FILE, _advanced_provider_daily_limits())
 
 
 def _reserve_advanced_provider_quota(provider: str, units: int = 1) -> None:
-    units = max(1, int(units or 1))
-    _reserve_advanced_provider_monthly_quota(provider, units)
-    limits = _advanced_provider_daily_limits()
-    limit = int(limits.get(provider, 0) or 0)
-    if limit <= 0:
-        raise HTTPException(status_code=429, detail={
-            'source': provider,
-            'reason': 'advanced_provider_disabled_by_daily_limit',
-            'message': f'{provider} daily request limit is disabled or set to zero.',
-            'daily_limit': limit,
-            'used_today': 0,
-            'requested_units': units,
-        })
-    quota_file, lock_file = _advanced_provider_quota_paths()
-    day = _advanced_provider_quota_day()
-    with open(lock_file, 'a+', encoding='utf-8') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            try:
-                with open(quota_file, 'r', encoding='utf-8') as fh:
-                    data = json.load(fh)
-            except Exception:
-                data = {}
-            if not isinstance(data, dict):
-                data = {}
-            data = {day: data.get(day, {}) if isinstance(data.get(day), dict) else {}}
-            used = int(data[day].get(provider, 0) or 0)
-            if used + units > limit:
-                retry_after = 86400 - (datetime.utcnow().hour * 3600 + datetime.utcnow().minute * 60 + datetime.utcnow().second)
-                raise HTTPException(status_code=429, detail={
-                    'source': provider,
-                    'reason': 'advanced_provider_daily_limit_reached',
-                    'message': f'{provider} daily free/provider limit reached inside Searchbox.',
-                    'daily_limit': limit,
-                    'used_today': used,
-                    'requested_units': units,
-                    'retry_after_seconds': retry_after,
-                }, headers={'Retry-After': str(retry_after)})
-            data[day][provider] = used + units
-            tmp_file = quota_file + '.tmp'
-            with open(tmp_file, 'w', encoding='utf-8') as fh:
-                json.dump(data, fh, sort_keys=True)
-            os.replace(tmp_file, quota_file)
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    quota_state.reserve_daily(
+        provider,
+        ADVANCED_PROVIDER_QUOTA_FILE,
+        _advanced_provider_daily_limits(),
+        monthly_quota_file=ADVANCED_PROVIDER_MONTHLY_QUOTA_FILE,
+        monthly_limits=_advanced_provider_monthly_limits(),
+        units=units,
+    )
 
 def _arxiv_cooldown_remaining_seconds() -> int:
     return max(0, int(round(_ARXIV_COOLDOWN_UNTIL - time.monotonic())))
