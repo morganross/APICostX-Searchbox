@@ -297,6 +297,63 @@ def test_usage_cost_is_consistent_for_metered_and_free_sources() -> None:
     assert pay["cost_confidence"] == "estimated"
 
 
+def test_usage_evidence_prefers_provider_reported_llm_costs() -> None:
+    usage = calculate_searchbox_usage(
+        "brave",
+        search_queries=1,
+        llm_attempts=[
+            {
+                "provider": "openrouter",
+                "model": "openai/gpt-5-mini",
+                "success": True,
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "cost": 0.123456},
+            }
+        ],
+    )
+
+    assert usage["llm_cost_usd"] == 0.123456
+    assert usage["llm_cost_confidence"] == "exact"
+    assert usage["usage_evidence"]["llm"]["cost_sources"] == {"provider_reported": 1}
+    assert usage["usage_evidence"]["llm"]["prompt_tokens"] == 1000
+    assert usage["usage_evidence"]["llm"]["completion_tokens"] == 200
+
+
+def test_usage_evidence_records_exact_provider_cost_details_and_attempts() -> None:
+    usage = calculate_searchbox_usage(
+        "web+advanced:serpapi_scholar",
+        search_queries=2,
+        llm_attempts=[
+            {
+                "provider": "openrouter",
+                "model": "free-model",
+                "success": False,
+                "failure_type": "RateLimitError",
+            },
+            {
+                "provider": "openrouter",
+                "model": "paid-model",
+                "success": True,
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 5,
+                    "cost_details": {"upstream_inference_cost": 0.0042},
+                },
+            },
+        ],
+        search_attempts=[{"provider": "serper", "success": True}, {"provider": "serpapi_scholar", "success": True}],
+        fetch_attempts=[{"url": "https://example.com", "method": "http", "success": True}],
+    )
+
+    evidence = usage["usage_evidence"]
+    assert evidence["schema_version"] == "searchbox-usage-evidence-v1"
+    assert usage["cost_confidence"] == "unknown_external_meter"
+    assert evidence["search"]["attempt_count"] == 2
+    assert evidence["fetch"]["attempt_count"] == 1
+    assert evidence["llm"]["attempt_count"] == 2
+    assert evidence["llm"]["failure_count"] == 1
+    assert evidence["llm"]["cost_sources"] == {"provider_cost_details.upstream_inference_cost": 1}
+
+
 def test_default_llm_candidate_order_uses_free_models_before_paid_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "LLM_MODEL", "openrouter/qwen/qwen3-coder:free")
     monkeypatch.setattr(main, "LLM_PROVIDER", "openrouter")

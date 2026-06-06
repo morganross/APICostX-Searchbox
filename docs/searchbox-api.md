@@ -68,6 +68,56 @@ Result behavior:
 - `results[0].content` contains the same synthesis plus web/scientific context and sources.
 - `raw_content` contains fuller extracted source text where available.
 
+
+## Usage Evidence
+
+Searchbox emits per-request usage evidence for downstream metering systems. It does not decide final billable ACM cost. ACM Metering is the final billing authority and should use Searchbox fields as upstream facts.
+
+When `include_usage=true` or `caller=aiq`, the response includes `usage`. Compatibility headers are also emitted on every `/search` response.
+
+Stable compatibility fields:
+
+```text
+total_cost_usd
+search_cost_usd
+scrape_cost_usd
+llm_cost_usd
+search_requests
+scrape_fetches
+cost_confidence
+llm_cost_source
+llm_cost_confidence
+```
+
+The detailed evidence envelope lives at `usage.usage_evidence`:
+
+```json
+{
+  "schema_version": "searchbox-usage-evidence-v1",
+  "search": {"attempt_count": 2, "attempts": []},
+  "fetch": {"attempt_count": 5, "attempts": []},
+  "llm": {"attempt_count": 3, "usage_attempt_count": 2, "cost_sources": {}, "attempts": []}
+}
+```
+
+LLM cost evidence prefers provider-reported values, including LiteLLM/OpenRouter `usage.cost` and `usage.cost_details.upstream_inference_cost`. Token estimates are used only when upstream providers omit cost fields, and those estimates are marked with lower confidence. Search and fetch attempts include provider/source names, success flags, result counts, HTTP/fetch metadata where available, and failure details when safe to expose.
+
+Relevant response headers include:
+
+```text
+X-Searchbox-Usage-Total-Cost
+X-Searchbox-Usage-Search-Cost
+X-Searchbox-Usage-Scrape-Cost
+X-Searchbox-Usage-LLM-Cost
+X-Searchbox-Usage-Cost-Confidence
+X-Searchbox-Usage-LLM-Cost-Confidence
+X-Searchbox-Usage-LLM-Cost-Source
+X-Searchbox-Usage-Search-Attempts
+X-Searchbox-Usage-Fetch-Attempts
+X-Searchbox-Usage-LLM-Attempts
+X-Searchbox-Usage-Evidence-Schema
+```
+
 ## `GET /search`
 
 GET wrapper around `POST /search`.

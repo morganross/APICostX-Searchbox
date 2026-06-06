@@ -4,6 +4,7 @@ import os
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,28 @@ except Exception:
 
 
 BASE_DIR = Path(__file__).resolve().parent
+_REQUEST_USAGE_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("searchbox_request_usage_context", default=None)
+
+
+def _record_usage_event(kind: str, event: Dict[str, Any]) -> None:
+    ctx = _REQUEST_USAGE_CONTEXT.get()
+    if not isinstance(ctx, dict):
+        return
+    key = f"{kind}_attempts"
+    bucket = ctx.setdefault(key, [])
+    if isinstance(bucket, list):
+        item = dict(event or {})
+        item.setdefault("request_id", ctx.get("request_id"))
+        bucket.append(item)
+
+
+def _current_usage_attempts(kind: str) -> list[dict[str, Any]]:
+    ctx = _REQUEST_USAGE_CONTEXT.get()
+    if not isinstance(ctx, dict):
+        return []
+    bucket = ctx.get(f"{kind}_attempts")
+    return [dict(item) for item in bucket] if isinstance(bucket, list) else []
+
 
 
 def _load_env_file() -> None:
@@ -309,6 +332,22 @@ from searchbox.models import (  # noqa: E402,F401
 app = FastAPI(title="Searchbox", version="0.1.0")
 
 
+@app.middleware("http")
+async def _usage_context_middleware(request, call_next):
+    token = _REQUEST_USAGE_CONTEXT.set(
+        {
+            "request_id": "",
+            "llm_attempts": [],
+            "search_attempts": [],
+            "fetch_attempts": [],
+        }
+    )
+    try:
+        return await call_next(request)
+    finally:
+        _REQUEST_USAGE_CONTEXT.reset(token)
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
@@ -508,18 +547,26 @@ def _authorize(authorization: Optional[str], api_key: Optional[str] = None) -> N
 
 def _log_llm_attempt(event: Dict[str, Any]) -> None:
     event = dict(event or {})
+    ctx = _REQUEST_USAGE_CONTEXT.get()
+    if isinstance(ctx, dict) and ctx.get("request_id") and not event.get("request_id"):
+        event["request_id"] = ctx.get("request_id")
     event.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     event.setdefault("event_type", "llm_attempt")
     for forbidden in ("prompt", "messages", "raw", "raw_model_output", "api_key"):
         event.pop(forbidden, None)
+    _record_usage_event("llm", event)
     _append_jsonl(LLM_ATTEMPT_LOG_FILE, event)
 
 
 def _log_provider_event(event: Dict[str, Any]) -> None:
     event = dict(event or {})
+    ctx = _REQUEST_USAGE_CONTEXT.get()
+    if isinstance(ctx, dict) and ctx.get("request_id") and not event.get("request_id"):
+        event["request_id"] = ctx.get("request_id")
     event.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     event.setdefault("event_type", "provider_event")
     event.pop("api_key", None)
+    _record_usage_event("search", event)
     _append_jsonl(PROVIDER_EVENT_LOG_FILE, event)
 
 
@@ -3322,6 +3369,8 @@ async def _run_llm_orchestrator(
                             "latency_ms": int((time.monotonic() - rt0) * 1000),
                             "finish_reason": repair_payload.get("finish_reason"),
                         }
+                        if repair_payload.get("usage"):
+                            repair_attempt["usage"] = repair_payload.get("usage")
                         attempts.append(repair_attempt)
                         _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
                         if repair_validation["ok"]:
@@ -3572,11 +3621,49 @@ def _build_aggregate_search_result(
     )
 
 
+def _fetch_usage_attempts(results: List[SearchItem]) -> List[Dict[str, Any]]:
+    attempts: List[Dict[str, Any]] = []
+    for item in results:
+        method = item.extract_method or item.summary_input_mode or item.fetch_status
+        has_fetch_evidence = any(
+            value is not None
+            for value in (
+                item.fetch_ms,
+                item.http_status,
+                item.content_type,
+                item.failure_reason,
+                item.error,
+                method,
+            )
+        )
+        if not has_fetch_evidence and not item.scraped:
+            continue
+        attempts.append(
+            {
+                "url": item.url,
+                "source": item.source,
+                "engine": item.engine,
+                "method": method,
+                "success": bool(item.scraped or item.usable_for_summary),
+                "fetch_status": item.fetch_status,
+                "http_status": item.http_status,
+                "content_type": item.content_type,
+                "content_chars": item.content_chars,
+                "fetch_ms": item.fetch_ms,
+                "failure_reason": item.failure_reason or item.error,
+            }
+        )
+    return attempts
+
+
 @app.post("/search", response_model=TavilySearchResponse)
 async def search(req: SearchRequest, authorization: Optional[str] = Header(default=None)):
     _authorize(authorization, req.api_key)
     _STATUS["requests_total"] += 1
     request_id = str(uuid.uuid4())
+    usage_context = _REQUEST_USAGE_CONTEXT.get()
+    if isinstance(usage_context, dict):
+        usage_context["request_id"] = request_id
 
     requested_results = req.max_results or req.count or 1
     web_context_count = min(SERPER_MAX_COUNT, max(SEARCHBOX_WEB_CONTEXT_RESULTS, int(requested_results or 1)))
@@ -3603,6 +3690,17 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     web_req.count = web_context_count
     web_req.max_results = web_context_count
     web_results = await _run_search(web_req)
+    _record_usage_event(
+        "search",
+        {
+            "event": "web_search",
+            "component": "web",
+            "provider": SEARCH_PROVIDER,
+            "success": bool(web_results),
+            "requested_count": web_context_count,
+            "result_count": len(web_results),
+        },
+    )
     classifier_result = (
         {"is_science": True, "confidence": 1.0, "reason": "advanced_search_force_override"}
         if forced_science
@@ -3618,8 +3716,32 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         science_req.max_results = science_count
         try:
             advanced_results = await _run_advanced_search(science_req)
+            _record_usage_event(
+                "search",
+                {
+                    "event": "advanced_search",
+                    "component": "science",
+                    "provider": _resolve_advanced_source(science_req),
+                    "success": bool(advanced_results),
+                    "requested_count": science_count,
+                    "result_count": len(advanced_results),
+                },
+            )
         except HTTPException as exc:
             advanced_results = []
+            _record_usage_event(
+                "search",
+                {
+                    "event": "advanced_search",
+                    "component": "science",
+                    "provider": _resolve_advanced_source(science_req),
+                    "success": False,
+                    "requested_count": science_count,
+                    "result_count": 0,
+                    "status_code": exc.status_code,
+                    "detail": exc.detail,
+                },
+            )
             classifier_result = dict(classifier_result or {})
             classifier_result["science_retrieval_error"] = {
                 "status_code": exc.status_code,
@@ -3659,12 +3781,16 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     scrapes_pw = len([r for r in results if r.scraped and r.extract_method == "playwright_fallback"])
     llm_usage = summary_payload.get("model_usage") if summary_payload else None
     usage_provider = f"web+advanced:{_resolve_advanced_source(search_req)}" if use_science else SEARCH_PROVIDER
+    fetch_attempts = _fetch_usage_attempts(results)
     usage = _calculate_searchbox_usage(
         provider=usage_provider,
-        search_queries=(1 + (1 if use_science else 0)) if results else 0,
+        search_queries=1 + (1 if use_science else 0),
         scrapes_http=scrapes_http,
         scrapes_playwright=scrapes_pw,
         llm_usage=llm_usage,
+        llm_attempts=_current_usage_attempts("llm"),
+        search_attempts=_current_usage_attempts("search"),
+        fetch_attempts=fetch_attempts,
     )
 
     aggregate_result = _build_aggregate_search_result(
@@ -3702,6 +3828,21 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         "X-Searchbox-Usage-LLM-Cost": str(usage.get("llm_cost_usd", 0.0)),
         "X-Searchbox-Usage-Search-Requests": str(usage.get("search_requests", 0)),
         "X-Searchbox-Usage-Scrape-Fetches": str(usage.get("scrape_fetches", 0)),
+        "X-Searchbox-Usage-Cost-Confidence": str(usage.get("cost_confidence", "")),
+        "X-Searchbox-Usage-LLM-Cost-Confidence": str(usage.get("llm_cost_confidence", "")),
+        "X-Searchbox-Usage-LLM-Cost-Source": str(usage.get("llm_cost_source", "")),
+        "X-Searchbox-Usage-LLM-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("llm") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Search-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("search") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Fetch-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("fetch") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Evidence-Schema": str(
+            (usage.get("usage_evidence") or {}).get("schema_version", "")
+        ),
     }
 
     dumped = response_data.model_dump() if hasattr(response_data, "model_dump") else response_data.dict()

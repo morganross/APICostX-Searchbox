@@ -69,6 +69,10 @@ async def test_post_search_returns_single_aggregate_result_and_usage(monkeypatch
     assert "Test summary synthesized" in body["results"][0]["content"]
     assert calls["advanced"] == 0
     assert body["usage"]["search_requests"] == 1
+    assert body["usage"]["usage_evidence"]["schema_version"] == "searchbox-usage-evidence-v1"
+    assert body["usage"]["usage_evidence"]["search"]["attempt_count"] >= 1
+    assert response.headers["X-Searchbox-Usage-Evidence-Schema"] == "searchbox-usage-evidence-v1"
+    assert int(response.headers["X-Searchbox-Usage-Search-Attempts"]) >= 1
     assert "serper_api_key" not in json.dumps(body).lower()
 
 
