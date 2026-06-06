@@ -22,11 +22,8 @@ def calculate_searchbox_usage(
     is_web_plus_advanced = provider.startswith("web+advanced:")
     billable_search_queries = 1 if is_web_plus_advanced else search_queries
     search_cost = 0.0 if (is_free_advanced_source or is_metered_advanced_source) else billable_search_queries * 0.001
-    scrape_cost = (
-        0.0
-        if (is_free_advanced_source or is_metered_advanced_source)
-        else (scrapes_http * 0.0) + (scrapes_playwright * 0.005)
-    )
+    # Fetches and scrapes are local Searchbox work, not pass-through paid provider usage.
+    scrape_cost = 0.0
 
     llm_cost = 0.0
     if llm_usage:

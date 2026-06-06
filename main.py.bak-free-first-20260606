@@ -209,27 +209,25 @@ ENRICH_MIN_CONTENT_CHARS = int(os.environ.get("ENRICH_MIN_CONTENT_CHARS", "240")
 ENRICH_DEFAULT_MAX_CHARS = int(os.environ.get("ENRICH_DEFAULT_MAX_CHARS", "160000"))
 
 SUMMARIZER_ENABLED = os.environ.get("SUMMARIZER_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-# Primary/default path: free OpenRouter models first, paid model only as a backstop.
-LLM_MODEL = os.environ.get("LLM_MODEL", "openrouter/qwen/qwen3-coder:free")
+# Primary model: DeepSeek V4 Flash (free, 1M ctx, fast)
+LLM_MODEL = os.environ.get("LLM_MODEL", "openrouter/openai/gpt-5-mini")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openrouter").strip().lower()
 LLM_QUALITY_TIER = os.environ.get("LLM_QUALITY_TIER", "balanced").strip().lower()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip() or None
 OPENROUTER_API_BASE = os.environ.get("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1").strip()
 OPENROUTER_MODEL_CHEAP = os.environ.get("OPENROUTER_MODEL_CHEAP", "openrouter/qwen/qwen3-coder:free").strip()
-OPENROUTER_MODEL_BALANCED = os.environ.get("OPENROUTER_MODEL_BALANCED", "openrouter/qwen/qwen3-coder:free").strip()
+OPENROUTER_MODEL_BALANCED = os.environ.get("OPENROUTER_MODEL_BALANCED", "openrouter/openai/gpt-5-mini").strip()
 OPENROUTER_MODEL_BEST = os.environ.get("OPENROUTER_MODEL_BEST", "openrouter/openai/gpt-5-mini").strip()
-# Fallback cascade: more free capacity first, then GPT-5 Mini as the paid backstop.
+# Fallback cascade: GPT-5 Mini primary, then free models as opportunistic backstops.
 LLM_FALLBACK_MODELS = [
     m.strip()
     for m in os.environ.get(
         "LLM_FALLBACK_MODELS",
-        "openrouter/moonshotai/kimi-k2.6:free,openrouter/openai/gpt-5-mini",
+        "openrouter/moonshotai/kimi-k2.6:free,openrouter/qwen/qwen3-coder:free",
     ).split(",")
     if m.strip()
 ]
 LLM_MAX_ATTEMPTS = int(os.environ.get("LLM_MAX_ATTEMPTS", "4"))  # 3 free + 1 paid backstop
-LLM_FREE_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_FREE_RATE_LIMIT_RETRIES", "1"))
-LLM_FREE_RATE_LIMIT_MAX_SLEEP = float(os.environ.get("LLM_FREE_RATE_LIMIT_MAX_SLEEP", "30"))
 LLM_MAX_REPAIR_ATTEMPTS = int(os.environ.get("LLM_MAX_REPAIR_ATTEMPTS", "1"))
 LLM_MAX_TOTAL_SECONDS = float(os.environ.get("LLM_MAX_TOTAL_SECONDS", "120"))  # free models can be slow
 LLM_ALLOW_EXPENSIVE_FALLBACK = os.environ.get("LLM_ALLOW_EXPENSIVE_FALLBACK", "true").lower() in (
@@ -2217,80 +2215,58 @@ async def _classify_science_query(
             _log_llm_attempt(attempt)
             attempts.append(attempt)
             continue
-        free_rate_retries = 0
-        while True:
-            t0 = time.monotonic()
-            try:
-                remaining = _remaining_llm_timeout(
-                    started,
-                    float(resolved_llm.get("max_total_seconds") or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS),
-                    float(resolved_llm.get("timeout") or SCIENCE_CLASSIFIER_TIMEOUT),
-                )
-                if remaining <= 0:
-                    raise asyncio.TimeoutError("science_classifier_budget_exhausted")
-                llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=remaining)
-                payload = _extract_llm_response_payload(llm_resp)
-                parsed = _extract_json_from_text(payload.get("raw") or "")
-                normalized = _normalize_science_classifier_payload(parsed)
-                success = isinstance(parsed, dict)
-                attempt = {
-                    "purpose": "science_classifier",
-                    "request_id": request_id,
-                    "provider": spec["provider"],
-                    "model": spec["model"],
-                    "role": "classifier",
-                    "success": success,
-                    "failure_type": None if success else "invalid_json",
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                    "finish_reason": payload.get("finish_reason"),
-                    "classification": normalized.get("is_science"),
-                    "confidence": normalized.get("confidence"),
-                    "category": normalized.get("category"),
-                }
-                if payload.get("usage"):
-                    attempt["usage"] = payload.get("usage")
-                _log_llm_attempt(attempt)
-                attempts.append(attempt)
-                if success:
-                    normalized["provider"] = spec["provider"]
-                    normalized["model"] = spec["model"]
-                    normalized["attempts"] = attempts
-                    return normalized
-                break
-            except Exception as exc:
-                attempt = {
-                    "purpose": "science_classifier",
-                    "request_id": request_id,
-                    "provider": spec["provider"],
-                    "model": spec["model"],
-                    "role": "classifier",
-                    "success": False,
-                    "failure_type": type(exc).__name__,
-                    "error": str(exc),
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                }
-                remaining = float(resolved_llm.get("max_total_seconds") or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS) - (
-                    time.monotonic() - started
-                )
-                retry_sleep = _free_llm_retry_sleep_seconds(
-                    exc, retry_index=free_rate_retries, remaining_seconds=remaining
-                )
-                if (
-                    _is_free_llm_spec(spec)
-                    and _is_retryable_free_llm_rate_limit(exc)
-                    and free_rate_retries < max(0, LLM_FREE_RATE_LIMIT_RETRIES)
-                    and retry_sleep > 0
-                ):
-                    free_rate_retries += 1
-                    attempt["retrying_same_model"] = True
-                    attempt["retry_sleep_seconds"] = round(retry_sleep, 3)
-                    _log_llm_attempt(attempt)
-                    attempts.append(attempt)
-                    await asyncio.sleep(retry_sleep)
-                    continue
-                _log_llm_attempt(attempt)
-                attempts.append(attempt)
-                break
+        t0 = time.monotonic()
+        try:
+            remaining = _remaining_llm_timeout(
+                started,
+                float(resolved_llm.get("max_total_seconds") or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS),
+                float(resolved_llm.get("timeout") or SCIENCE_CLASSIFIER_TIMEOUT),
+            )
+            if remaining <= 0:
+                raise asyncio.TimeoutError("science_classifier_budget_exhausted")
+            llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=remaining)
+            payload = _extract_llm_response_payload(llm_resp)
+            parsed = _extract_json_from_text(payload.get("raw") or "")
+            normalized = _normalize_science_classifier_payload(parsed)
+            success = isinstance(parsed, dict)
+            attempt = {
+                "purpose": "science_classifier",
+                "request_id": request_id,
+                "provider": spec["provider"],
+                "model": spec["model"],
+                "role": "classifier",
+                "success": success,
+                "failure_type": None if success else "invalid_json",
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "finish_reason": payload.get("finish_reason"),
+                "classification": normalized.get("is_science"),
+                "confidence": normalized.get("confidence"),
+                "category": normalized.get("category"),
+            }
+            if payload.get("usage"):
+                attempt["usage"] = payload.get("usage")
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            if success:
+                normalized["provider"] = spec["provider"]
+                normalized["model"] = spec["model"]
+                normalized["attempts"] = attempts
+                return normalized
+        except Exception as exc:
+            attempt = {
+                "purpose": "science_classifier",
+                "request_id": request_id,
+                "provider": spec["provider"],
+                "model": spec["model"],
+                "role": "classifier",
+                "success": False,
+                "failure_type": type(exc).__name__,
+                "error": str(exc),
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+            _log_llm_attempt(attempt)
+            attempts.append(attempt)
+            continue
     return {"is_science": False, "confidence": 0.0, "reason": "science_classifier_failed", "attempts": attempts}
 
 
@@ -2988,46 +2964,6 @@ def _is_expensive_llm_spec(spec: Dict[str, str]) -> bool:
     return any(marker in model for marker in ("gpt-5", "gpt-4", "claude-3", "o1", "o3", "o4"))
 
 
-def _is_free_llm_spec(spec: Dict[str, str]) -> bool:
-    return ":free" in (spec.get("model") or "").lower()
-
-
-def _extract_llm_retry_after_seconds(error: Exception) -> Optional[float]:
-    text = str(error)
-    patterns = (
-        r'"retry_after_seconds_raw"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-        r'"retry_after_seconds"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
-        r"retry_after_seconds_raw['\"]?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
-        r"retry_after_seconds['\"]?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
-        r'"Retry-After"\s*:\s*"([0-9]+(?:\.[0-9]+)?)"',
-        r"Retry-After['\"]?\s*[:=]\s*['\"]?([0-9]+(?:\.[0-9]+)?)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        try:
-            value = float(match.group(1))
-        except Exception:
-            continue
-        if value > 0:
-            return value
-    return None
-
-
-def _free_llm_retry_sleep_seconds(error: Exception, *, retry_index: int, remaining_seconds: float) -> float:
-    if remaining_seconds <= 2:
-        return 0.0
-    retry_after = _extract_llm_retry_after_seconds(error)
-    backoff = retry_after if retry_after is not None else float(2 ** max(0, retry_index))
-    return max(0.0, min(backoff, LLM_FREE_RATE_LIMIT_MAX_SLEEP, remaining_seconds - 1.0))
-
-
-def _is_retryable_free_llm_rate_limit(error: Exception) -> bool:
-    text = str(error).lower()
-    return type(error).__name__ == "RateLimitError" or "ratelimiterror" in text or "429" in text
-
-
 def _extract_llm_response_payload(llm_resp: Any) -> Dict[str, Any]:
     raw = None
     finish_reason = None
@@ -3260,125 +3196,104 @@ async def _run_llm_orchestrator(
             attempts.append(attempt)
             _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
             continue
-        free_rate_retries = 0
-        while True:
-            t0 = time.monotonic()
-            try:
-                attempt_timeout = _remaining_llm_timeout(started, total_budget, resolved_llm["timeout"])
-                if attempt_timeout <= 0:
-                    raise asyncio.TimeoutError("llm_total_budget_exhausted")
-                llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=attempt_timeout)
-                payload = _extract_llm_response_payload(llm_resp)
-                last_payload = payload
-                parsed = _extract_json_from_text(payload.get("raw") or "")
-                validation = _validate_summary_payload(parsed, candidate_items)
-                attempt = {
+        t0 = time.monotonic()
+        try:
+            attempt_timeout = _remaining_llm_timeout(started, total_budget, resolved_llm["timeout"])
+            if attempt_timeout <= 0:
+                raise asyncio.TimeoutError("llm_total_budget_exhausted")
+            llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=attempt_timeout)
+            payload = _extract_llm_response_payload(llm_resp)
+            last_payload = payload
+            parsed = _extract_json_from_text(payload.get("raw") or "")
+            validation = _validate_summary_payload(parsed, candidate_items)
+            attempt = {
+                "provider": spec["provider"],
+                "model": spec["model"],
+                "role": "answer",
+                "success": bool(validation["ok"]),
+                "failure_type": validation.get("failure_type"),
+                "reasons": validation.get("reasons") or [],
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+                "finish_reason": payload.get("finish_reason"),
+            }
+            if payload.get("usage"):
+                attempt["usage"] = payload.get("usage")
+            attempts.append(attempt)
+            _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
+            if validation["ok"]:
+                return {
+                    "ok": True,
+                    "parsed": validation["payload"],
+                    "raw": payload.get("raw"),
+                    "finish_reason": payload.get("finish_reason"),
+                    "usage": payload.get("usage"),
                     "provider": spec["provider"],
                     "model": spec["model"],
-                    "role": "answer",
-                    "success": bool(validation["ok"]),
-                    "failure_type": validation.get("failure_type"),
-                    "reasons": validation.get("reasons") or [],
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                    "finish_reason": payload.get("finish_reason"),
+                    "attempts": attempts,
+                    "repaired": False,
                 }
-                if payload.get("usage"):
-                    attempt["usage"] = payload.get("usage")
-                attempts.append(attempt)
-                _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
-                if validation["ok"]:
-                    return {
-                        "ok": True,
-                        "parsed": validation["payload"],
-                        "raw": payload.get("raw"),
-                        "finish_reason": payload.get("finish_reason"),
-                        "usage": payload.get("usage"),
-                        "provider": spec["provider"],
-                        "model": spec["model"],
-                        "attempts": attempts,
-                        "repaired": False,
+            for repair_index in range(repair_limit):
+                rt0 = time.monotonic()
+                try:
+                    repair_timeout = _remaining_llm_timeout(
+                        started, total_budget, resolved_llm.get("repair_timeout") or resolved_llm["timeout"]
+                    )
+                    if repair_timeout <= 0:
+                        raise asyncio.TimeoutError("llm_total_budget_exhausted")
+                    repair_result = await _repair_summary_payload(
+                        payload.get("raw") or "", spec, resolved_llm, attempt_timeout=repair_timeout
+                    )
+                    repair_validation = _validate_summary_payload(repair_result.get("parsed"), candidate_items)
+                    repair_spec = repair_result.get("spec") or spec
+                    repair_payload = repair_result.get("response") or {}
+                    repair_attempt = {
+                        "provider": repair_spec["provider"],
+                        "model": repair_spec["model"],
+                        "role": "repair",
+                        "success": bool(repair_validation["ok"]),
+                        "failure_type": repair_validation.get("failure_type"),
+                        "reasons": repair_validation.get("reasons") or [],
+                        "latency_ms": int((time.monotonic() - rt0) * 1000),
+                        "finish_reason": repair_payload.get("finish_reason"),
                     }
-                for repair_index in range(repair_limit):
-                    rt0 = time.monotonic()
-                    try:
-                        repair_timeout = _remaining_llm_timeout(
-                            started, total_budget, resolved_llm.get("repair_timeout") or resolved_llm["timeout"]
-                        )
-                        if repair_timeout <= 0:
-                            raise asyncio.TimeoutError("llm_total_budget_exhausted")
-                        repair_result = await _repair_summary_payload(
-                            payload.get("raw") or "", spec, resolved_llm, attempt_timeout=repair_timeout
-                        )
-                        repair_validation = _validate_summary_payload(repair_result.get("parsed"), candidate_items)
-                        repair_spec = repair_result.get("spec") or spec
-                        repair_payload = repair_result.get("response") or {}
-                        repair_attempt = {
+                    attempts.append(repair_attempt)
+                    _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
+                    if repair_validation["ok"]:
+                        return {
+                            "ok": True,
+                            "parsed": repair_validation["payload"],
+                            "raw": repair_payload.get("raw"),
+                            "finish_reason": repair_payload.get("finish_reason"),
+                            "usage": repair_payload.get("usage"),
                             "provider": repair_spec["provider"],
                             "model": repair_spec["model"],
-                            "role": "repair",
-                            "success": bool(repair_validation["ok"]),
-                            "failure_type": repair_validation.get("failure_type"),
-                            "reasons": repair_validation.get("reasons") or [],
-                            "latency_ms": int((time.monotonic() - rt0) * 1000),
-                            "finish_reason": repair_payload.get("finish_reason"),
+                            "attempts": attempts,
+                            "repaired": True,
                         }
-                        attempts.append(repair_attempt)
-                        _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
-                        if repair_validation["ok"]:
-                            return {
-                                "ok": True,
-                                "parsed": repair_validation["payload"],
-                                "raw": repair_payload.get("raw"),
-                                "finish_reason": repair_payload.get("finish_reason"),
-                                "usage": repair_payload.get("usage"),
-                                "provider": repair_spec["provider"],
-                                "model": repair_spec["model"],
-                                "attempts": attempts,
-                                "repaired": True,
-                            }
-                    except Exception as repair_exc:
-                        repair_attempt = {
-                            "provider": spec["provider"],
-                            "model": spec["model"],
-                            "role": "repair",
-                            "success": False,
-                            "failure_type": type(repair_exc).__name__,
-                            "error": str(repair_exc),
-                            "latency_ms": int((time.monotonic() - rt0) * 1000),
-                        }
-                        attempts.append(repair_attempt)
-                        _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
-                break
-            except Exception as exc:
-                attempt = {
-                    "provider": spec["provider"],
-                    "model": spec["model"],
-                    "role": "answer",
-                    "success": False,
-                    "failure_type": type(exc).__name__,
-                    "error": str(exc),
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                }
-                remaining = total_budget - (time.monotonic() - started)
-                retry_sleep = _free_llm_retry_sleep_seconds(
-                    exc, retry_index=free_rate_retries, remaining_seconds=remaining
-                )
-                if (
-                    _is_free_llm_spec(spec)
-                    and _is_retryable_free_llm_rate_limit(exc)
-                    and free_rate_retries < max(0, LLM_FREE_RATE_LIMIT_RETRIES)
-                    and retry_sleep > 0
-                ):
-                    free_rate_retries += 1
-                    attempt["retrying_same_model"] = True
-                    attempt["retry_sleep_seconds"] = round(retry_sleep, 3)
-                    attempts.append(attempt)
-                    _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
-                    await asyncio.sleep(retry_sleep)
-                    continue
-                attempts.append(attempt)
-                _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
-                break
+                except Exception as repair_exc:
+                    repair_attempt = {
+                        "provider": spec["provider"],
+                        "model": spec["model"],
+                        "role": "repair",
+                        "success": False,
+                        "failure_type": type(repair_exc).__name__,
+                        "error": str(repair_exc),
+                        "latency_ms": int((time.monotonic() - rt0) * 1000),
+                    }
+                    attempts.append(repair_attempt)
+                    _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
+        except Exception as exc:
+            attempt = {
+                "provider": spec["provider"],
+                "model": spec["model"],
+                "role": "answer",
+                "success": False,
+                "failure_type": type(exc).__name__,
+                "error": str(exc),
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+            attempts.append(attempt)
+            _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
 
     return {
         "ok": False,

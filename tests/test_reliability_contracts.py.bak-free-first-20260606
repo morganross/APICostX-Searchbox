@@ -297,40 +297,6 @@ def test_usage_cost_is_consistent_for_metered_and_free_sources() -> None:
     assert pay["cost_confidence"] == "estimated"
 
 
-def test_default_llm_candidate_order_uses_free_models_before_paid_backstop(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main, "LLM_MODEL", "openrouter/qwen/qwen3-coder:free")
-    monkeypatch.setattr(main, "LLM_PROVIDER", "openrouter")
-    monkeypatch.setattr(main, "LLM_QUALITY_TIER", "balanced")
-    monkeypatch.setattr(main, "OPENROUTER_MODEL_BALANCED", "openrouter/qwen/qwen3-coder:free")
-    monkeypatch.setattr(
-        main,
-        "LLM_FALLBACK_MODELS",
-        ["openrouter/moonshotai/kimi-k2.6:free", "openrouter/openai/gpt-5-mini"],
-    )
-
-    resolved = main._resolve_llm_options(None)
-    specs = main._build_llm_candidate_specs(resolved)
-
-    assert [spec["model"] for spec in specs] == [
-        "openrouter/qwen/qwen3-coder:free",
-        "openrouter/moonshotai/kimi-k2.6:free",
-        "openrouter/openai/gpt-5-mini",
-    ]
-    assert main._is_free_llm_spec(specs[0]) is True
-    assert main._is_free_llm_spec(specs[1]) is True
-    assert main._is_expensive_llm_spec(specs[2]) is True
-
-
-def test_free_llm_retry_after_parser_bounds_sleep() -> None:
-    error = RuntimeError(
-        'RateLimitError: {"metadata":{"retry_after_seconds_raw":28.139,"headers":{"Retry-After":"29"}}}'
-    )
-
-    assert main._extract_llm_retry_after_seconds(error) == 28.139
-    assert main._free_llm_retry_sleep_seconds(error, retry_index=0, remaining_seconds=10) == 9.0
-    assert main._free_llm_retry_sleep_seconds(error, retry_index=0, remaining_seconds=60) == 28.139
-
-
 def test_aggregate_builder_includes_science_section_and_single_result_shape() -> None:
     web = SearchItem(
         rank=1,
