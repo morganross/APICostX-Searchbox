@@ -315,6 +315,14 @@ _STATUS = {
     "llm_error_total": 0,
     "last_error": None,
 }
+_INFLIGHT = {
+    "http_requests_inflight": 0,
+    "search_requests_inflight": 0,
+    "llm_requests_inflight": 0,
+    "fetch_requests_inflight": 0,
+    "playwright_inflight": 0,
+    "llm_queue_depth": 0,
+}
 
 
 # Transitional compatibility imports stay after .env loading until config moves into searchbox.config.
@@ -347,6 +355,10 @@ app = FastAPI(title="Searchbox", version="0.1.0")
 
 @app.middleware("http")
 async def _usage_context_middleware(request, call_next):
+    request_path = getattr(getattr(request, "url", None), "path", "")
+    _increment_inflight("http_requests_inflight")
+    if request_path in ("/search", "/search-summary"):
+        _increment_inflight("search_requests_inflight")
     token = _REQUEST_USAGE_CONTEXT.set(
         {
             "request_id": "",
@@ -359,6 +371,21 @@ async def _usage_context_middleware(request, call_next):
         return await call_next(request)
     finally:
         _REQUEST_USAGE_CONTEXT.reset(token)
+        if request_path in ("/search", "/search-summary"):
+            _decrement_inflight("search_requests_inflight")
+        _decrement_inflight("http_requests_inflight")
+
+
+def _increment_inflight(name: str, amount: int = 1) -> None:
+    _INFLIGHT[name] = max(0, int(_INFLIGHT.get(name, 0) or 0) + int(amount or 0))
+
+
+def _decrement_inflight(name: str, amount: int = 1) -> None:
+    _INFLIGHT[name] = max(0, int(_INFLIGHT.get(name, 0) or 0) - int(amount or 0))
+
+
+def _inflight_snapshot() -> Dict[str, int]:
+    return {name: int(value or 0) for name, value in sorted(_INFLIGHT.items())}
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -490,6 +517,7 @@ def health() -> Dict[str, Any]:
         "litellm_available": _LITELLM_AVAILABLE,
         "default_model": LLM_MODEL,
         "runtime_failure_ratios": health_state["runtime_failure_ratios"],
+        "inflight": _inflight_snapshot(),
     }
 
 
@@ -619,6 +647,7 @@ def config() -> Dict[str, Any]:
 @app.get("/status")
 def status() -> Dict[str, Any]:
     payload = dict(_STATUS)
+    payload["inflight"] = _inflight_snapshot()
     payload["logs"] = {
         "llm_attempt_log_file": LLM_ATTEMPT_LOG_FILE,
         "provider_event_log_file": PROVIDER_EVENT_LOG_FILE,
@@ -640,6 +669,7 @@ def health_monitor(authorization: Optional[str] = Header(default=None)) -> Dict[
         "reasons": health_state["reasons"],
         "runtime": dict(_STATUS),
         "runtime_failure_ratios": health_state["runtime_failure_ratios"],
+        "inflight": _inflight_snapshot(),
         "health_policy": health_state["policy"],
         "advanced_provider_daily_usage": _advanced_provider_quota_snapshot(),
         "advanced_provider_monthly_usage": _advanced_provider_monthly_quota_snapshot(),
@@ -1070,16 +1100,24 @@ def _extraction_settings() -> ExtractionSettings:
 
 
 async def _extract_with_playwright(url: str) -> Dict[str, Any]:
-    return await extract_with_playwright(
-        url,
-        user_agent=USER_AGENT,
-        timeout_ms=ENRICH_PLAYWRIGHT_TIMEOUT_MS,
-        max_chars=ENRICH_PLAYWRIGHT_MAX_CHARS,
-    )
+    _increment_inflight("playwright_inflight")
+    try:
+        return await extract_with_playwright(
+            url,
+            user_agent=USER_AGENT,
+            timeout_ms=ENRICH_PLAYWRIGHT_TIMEOUT_MS,
+            max_chars=ENRICH_PLAYWRIGHT_MAX_CHARS,
+        )
+    finally:
+        _decrement_inflight("playwright_inflight")
 
 
 async def _extract_content(url: str, timeout_s: float) -> Dict[str, Any]:
-    return await extract_content(url, timeout_s, settings=_extraction_settings())
+    _increment_inflight("fetch_requests_inflight")
+    try:
+        return await extract_content(url, timeout_s, settings=_extraction_settings())
+    finally:
+        _decrement_inflight("fetch_requests_inflight")
 
 
 def _failed_extract_result(url: str, exc: Exception, started_at: datetime) -> Dict[str, Any]:
@@ -3650,7 +3688,11 @@ async def _call_litellm_model(
     if resolved_llm.get("reasoning_effort") and candidate_provider != "openrouter":
         kwargs["reasoning_effort"] = resolved_llm["reasoning_effort"]
     timeout_s = max(1.0, float(attempt_timeout or resolved_llm["timeout"]))
-    return await asyncio.wait_for(asyncio.to_thread(lambda: llm_completion(**kwargs)), timeout=timeout_s)
+    _increment_inflight("llm_requests_inflight")
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(lambda: llm_completion(**kwargs)), timeout=timeout_s)
+    finally:
+        _decrement_inflight("llm_requests_inflight")
 
 
 async def _repair_summary_payload(
