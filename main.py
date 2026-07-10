@@ -263,6 +263,19 @@ LLM_ALLOW_EXPENSIVE_FALLBACK = os.environ.get("LLM_ALLOW_EXPENSIVE_FALLBACK", "t
 )
 LLM_REPAIR_MODEL = os.environ.get("LLM_REPAIR_MODEL", "").strip() or None
 LLM_RESPONSE_FORMAT = os.environ.get("LLM_RESPONSE_FORMAT", "auto").strip().lower()
+LLM_MODEL_HEALTH_ENABLED = os.environ.get("LLM_MODEL_HEALTH_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+LLM_MODEL_COOLDOWN_FILE = os.environ.get(
+    "LLM_MODEL_COOLDOWN_FILE", str(BASE_DIR / "data" / "llm_model_cooldowns.json")
+).strip()
+LLM_MODEL_COOLDOWN_MAX_SECONDS = int(os.environ.get("LLM_MODEL_COOLDOWN_MAX_SECONDS", "3600"))
+LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS", "900"))
+LLM_MODEL_TIMEOUT_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_TIMEOUT_COOLDOWN_SECONDS", "300"))
+LLM_MODEL_PROVIDER_ERROR_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_PROVIDER_ERROR_COOLDOWN_SECONDS", "300"))
+LLM_MODEL_AUTH_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_AUTH_COOLDOWN_SECONDS", "3600"))
+LLM_MODEL_VALIDATION_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_VALIDATION_COOLDOWN_SECONDS", "180"))
+LLM_MODEL_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_FAILURE_THRESHOLD", "2"))
+LLM_MODEL_VALIDATION_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_VALIDATION_FAILURE_THRESHOLD", "3"))
+LLM_MODEL_FAIL_OPEN = os.environ.get("LLM_MODEL_FAIL_OPEN", "true").lower() in ("1", "true", "yes", "on")
 LLM_SYSTEM_PROMPT = os.environ.get(
     "LLM_SYSTEM_PROMPT",
     'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.',
@@ -348,10 +361,125 @@ async def _usage_context_middleware(request, call_next):
         _REQUEST_USAGE_CONTEXT.reset(token)
 
 
+def _safe_ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(float(numerator) / float(denominator), 4)
+
+
+def _runtime_failure_ratios() -> Dict[str, Any]:
+    provider_success = int(_STATUS.get("provider_success_total") or 0)
+    provider_failure = int(_STATUS.get("provider_error_total") or 0)
+    provider_total = provider_success + provider_failure
+    llm_success = int(_STATUS.get("llm_success_total") or 0)
+    llm_failure = int(_STATUS.get("llm_error_total") or 0)
+    llm_total = llm_success + llm_failure
+    extract_success = int(_STATUS.get("extract_success_total") or 0)
+    extract_failure = int(_STATUS.get("extract_error_total") or 0)
+    extract_total = extract_success + extract_failure
+    return {
+        "provider": {
+            "success": provider_success,
+            "failure": provider_failure,
+            "failure_ratio": _safe_ratio(provider_failure, provider_total),
+        },
+        "llm": {
+            "success": llm_success,
+            "failure": llm_failure,
+            "failure_ratio": _safe_ratio(llm_failure, llm_total),
+        },
+        "extract": {
+            "success": extract_success,
+            "failure": extract_failure,
+            "failure_ratio": _safe_ratio(extract_failure, extract_total),
+        },
+    }
+
+
+def _configured_search_provider_available() -> bool:
+    provider = (SEARCH_PROVIDER or "").strip().lower()
+    if provider == "serper":
+        return bool(SERPER_API_KEY)
+    if provider == "brave":
+        return bool(BRAVE_API_KEY)
+    if provider == "searxng":
+        return bool(SEARXNG_URL)
+    return True
+
+
+def _health_state(recent_llm: Optional[Dict[str, Any]] = None, recent_provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ratios = _runtime_failure_ratios()
+    reasons: List[str] = []
+    failing_reasons: List[str] = []
+
+    if not _configured_search_provider_available() and int(_STATUS.get("provider_success_total") or 0) <= 0:
+        failing_reasons.append("primary_search_provider_not_configured")
+    if SUMMARIZER_ENABLED and not _LITELLM_AVAILABLE:
+        reasons.append("summarizer_enabled_without_litellm")
+    if ratios["provider"]["failure"] > 0 and ratios["provider"]["failure_ratio"] >= 0.2:
+        reasons.append("provider_error_ratio_high")
+    if ratios["llm"]["failure"] >= 5 and ratios["llm"]["failure_ratio"] >= 0.2:
+        reasons.append("llm_error_ratio_high")
+    if LLM_MODEL_HEALTH_ENABLED and _llm_model_active_cooldown_count() > 0:
+        reasons.append("llm_model_cooldowns_active")
+
+    if recent_llm:
+        recent_llm_failure = int(recent_llm.get("failure") or 0)
+        if recent_llm_failure >= 5 and float(recent_llm.get("failure_ratio") or 0.0) >= 0.2:
+            reasons.append("recent_llm_failure_ratio_high")
+    if recent_provider:
+        recent_provider_failure = int(recent_provider.get("failure") or 0)
+        if recent_provider_failure >= 5 and float(recent_provider.get("failure_ratio") or 0.0) >= 0.2:
+            reasons.append("recent_provider_failure_ratio_high")
+
+    if failing_reasons:
+        status = "failing"
+    elif reasons:
+        status = "degraded"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "reasons": failing_reasons + reasons,
+        "runtime_failure_ratios": ratios,
+        "policy": {
+            "degraded_failure_ratio_threshold": 0.2,
+            "llm_min_failures_for_degraded": 5,
+            "provider_min_failures_for_degraded": 1,
+        },
+    }
+
+
+def _summarize_events_with_ratios(events: List[Dict[str, Any]], group_fields: List[str]) -> Dict[str, Any]:
+    summary = _summarize_events(events, group_fields)
+    success = sum(int(group.get("success") or 0) for group in summary.get("groups", {}).values())
+    failure = sum(int(group.get("failure") or 0) for group in summary.get("groups", {}).values())
+    observed = success + failure
+    groups: Dict[str, Any] = {}
+    for key, group in summary.get("groups", {}).items():
+        group_success = int(group.get("success") or 0)
+        group_failure = int(group.get("failure") or 0)
+        group_observed = group_success + group_failure
+        groups[key] = {
+            **group,
+            "failure_ratio": _safe_ratio(group_failure, group_observed),
+        }
+    return {
+        **summary,
+        "success": success,
+        "failure": failure,
+        "failure_ratio": _safe_ratio(failure, observed),
+        "groups": groups,
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
+    health_state = _health_state()
     return {
-        "status": "ok",
+        "status": health_state["status"],
+        "reasons": health_state["reasons"],
         "provider": SEARCH_PROVIDER,
         "has_serper_key": bool(SERPER_API_KEY),
         "has_brave_key": bool(BRAVE_API_KEY),
@@ -361,6 +489,7 @@ def health() -> Dict[str, Any]:
         "summarizer_enabled": SUMMARIZER_ENABLED,
         "litellm_available": _LITELLM_AVAILABLE,
         "default_model": LLM_MODEL,
+        "runtime_failure_ratios": health_state["runtime_failure_ratios"],
     }
 
 
@@ -455,6 +584,12 @@ def config() -> Dict[str, Any]:
             "max_total_seconds_default": LLM_MAX_TOTAL_SECONDS,
             "allow_expensive_fallback_default": LLM_ALLOW_EXPENSIVE_FALLBACK,
             "repair_model_configured": bool(LLM_REPAIR_MODEL),
+            "model_health_enabled": LLM_MODEL_HEALTH_ENABLED,
+            "model_health_fail_open": LLM_MODEL_FAIL_OPEN,
+            "model_health_cooldown_file_configured": bool(LLM_MODEL_COOLDOWN_FILE),
+            "model_health_cooldown_max_seconds": LLM_MODEL_COOLDOWN_MAX_SECONDS,
+            "model_health_validation_failure_threshold": LLM_MODEL_VALIDATION_FAILURE_THRESHOLD,
+            "model_health_failure_threshold": LLM_MODEL_FAILURE_THRESHOLD,
             "response_format_default": LLM_RESPONSE_FORMAT,
             "repair_timeout_default": LLM_REPAIR_TIMEOUT,
             "request_options_enabled": LLM_ALLOW_REQUEST_OPTIONS,
@@ -497,14 +632,21 @@ def health_monitor(authorization: Optional[str] = Header(default=None)) -> Dict[
     _authorize(authorization)
     llm_events = _tail_jsonl(LLM_ATTEMPT_LOG_FILE, 500)
     provider_events = _tail_jsonl(PROVIDER_EVENT_LOG_FILE, 500)
+    llm_recent = _summarize_events_with_ratios(llm_events, ["purpose", "provider", "model"])
+    provider_recent = _summarize_events_with_ratios(provider_events, ["provider", "event"])
+    health_state = _health_state(llm_recent, provider_recent)
     return {
-        "status": "ok",
+        "status": health_state["status"],
+        "reasons": health_state["reasons"],
         "runtime": dict(_STATUS),
+        "runtime_failure_ratios": health_state["runtime_failure_ratios"],
+        "health_policy": health_state["policy"],
         "advanced_provider_daily_usage": _advanced_provider_quota_snapshot(),
         "advanced_provider_monthly_usage": _advanced_provider_monthly_quota_snapshot(),
         "advanced_provider_cooldowns": _advanced_provider_cooldown_snapshot(),
-        "llm_attempts_recent": _summarize_events(llm_events, ["purpose", "provider", "model"]),
-        "provider_events_recent": _summarize_events(provider_events, ["provider", "event"]),
+        "llm_model_cooldowns": _llm_model_health_snapshot(),
+        "llm_attempts_recent": llm_recent,
+        "provider_events_recent": provider_recent,
     }
 
 
@@ -750,6 +892,8 @@ def _resolve_llm_options(options: Optional[LLMOptions]) -> Dict[str, Any]:
         if request_options and request_options.system_prompt is not None
         else LLM_SYSTEM_PROMPT,
         "request_options_enabled": LLM_ALLOW_REQUEST_OPTIONS,
+        "model_explicitly_forced": bool(LLM_FORCE_MODEL)
+        or bool(request_options and str(request_options.model or "").strip()),
     }
 
 
@@ -791,7 +935,7 @@ async def _normalize_search_query(req: Any) -> str:
                 "Do not use markdown or extra text."
             )
             messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": base_query}]
-            for spec in _build_llm_candidate_specs(resolved_llm):
+            for spec in _llm_candidate_specs_for_health(resolved_llm, "query_optimizer"):
                 try:
                     attempt_timeout = min(float(resolved_llm.get("timeout", 3.0)), 3.0)
                     llm_resp = await _call_litellm_model(spec, messages, resolved_llm, attempt_timeout=attempt_timeout)
@@ -802,8 +946,17 @@ async def _normalize_search_query(req: Any) -> str:
                         final_query = opt_query
                         if operators:
                             final_query += " " + " ".join(operators)
+                        _mark_llm_model_success(spec, "query_optimizer")
                         return final_query.strip()
+                    _mark_llm_model_failure(spec, "query_optimizer", "invalid_json")
                 except Exception as inner_e:
+                    _mark_llm_model_failure(
+                        spec,
+                        "query_optimizer",
+                        type(inner_e).__name__,
+                        error=str(inner_e),
+                        retry_after_seconds=_extract_llm_retry_after_seconds(inner_e),
+                    )
                     import traceback
 
                     print("LLM QUERY MAKER INNER FAILED:", repr(inner_e))
@@ -2249,7 +2402,7 @@ async def _classify_science_query(
     started = time.monotonic()
     attempts: List[Dict[str, Any]] = []
     allow_expensive = bool(resolved_llm.get("allow_expensive_fallback"))
-    for spec in _build_llm_candidate_specs(resolved_llm):
+    for spec in _llm_candidate_specs_for_health(resolved_llm, "science_classifier"):
         if time.monotonic() - started > float(
             resolved_llm.get("max_total_seconds") or SCIENCE_CLASSIFIER_MAX_TOTAL_SECONDS
         ):
@@ -2264,6 +2417,7 @@ async def _classify_science_query(
             }
             _log_llm_attempt(attempt)
             attempts.append(attempt)
+            _mark_llm_model_failure(spec, "science_classifier", "budget_exhausted")
             break
         if (
             not allow_expensive
@@ -2317,10 +2471,12 @@ async def _classify_science_query(
                 _log_llm_attempt(attempt)
                 attempts.append(attempt)
                 if success:
+                    _mark_llm_model_success(spec, "science_classifier")
                     normalized["provider"] = spec["provider"]
                     normalized["model"] = spec["model"]
                     normalized["attempts"] = attempts
                     return normalized
+                _mark_llm_model_failure(spec, "science_classifier", "invalid_json")
                 break
             except Exception as exc:
                 attempt = {
@@ -2355,6 +2511,13 @@ async def _classify_science_query(
                     continue
                 _log_llm_attempt(attempt)
                 attempts.append(attempt)
+                _mark_llm_model_failure(
+                    spec,
+                    "science_classifier",
+                    type(exc).__name__,
+                    error=str(exc),
+                    retry_after_seconds=_extract_llm_retry_after_seconds(exc),
+                )
                 break
     return {"is_science": False, "confidence": 0.0, "reason": "science_classifier_failed", "attempts": attempts}
 
@@ -3097,6 +3260,240 @@ def _is_retryable_free_llm_rate_limit(error: Exception) -> bool:
     return type(error).__name__ == "RateLimitError" or "ratelimiterror" in text or "429" in text
 
 
+def _llm_model_health_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _llm_model_health_key(spec: Dict[str, str], purpose: str) -> str:
+    return "|".join([str(purpose or "unknown"), spec.get("provider") or "unknown", spec.get("model") or "unknown"])
+
+
+def _load_llm_model_health_state() -> Dict[str, Any]:
+    if not LLM_MODEL_COOLDOWN_FILE or not os.path.exists(LLM_MODEL_COOLDOWN_FILE):
+        return {"schema_version": "llm-model-health-v1", "models": {}}
+    try:
+        with open(LLM_MODEL_COOLDOWN_FILE, encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except Exception:
+        return {"schema_version": "llm-model-health-v1", "models": {}}
+    if not isinstance(parsed, dict):
+        return {"schema_version": "llm-model-health-v1", "models": {}}
+    models = parsed.get("models")
+    if not isinstance(models, dict):
+        parsed["models"] = {}
+    parsed.setdefault("schema_version", "llm-model-health-v1")
+    return parsed
+
+
+def _write_llm_model_health_state(state: Dict[str, Any]) -> None:
+    if not LLM_MODEL_COOLDOWN_FILE:
+        return
+    try:
+        os.makedirs(os.path.dirname(LLM_MODEL_COOLDOWN_FILE) or ".", exist_ok=True)
+        payload = dict(state or {})
+        payload["schema_version"] = "llm-model-health-v1"
+        payload["updated_at"] = _llm_model_health_timestamp()
+        tmp_path = LLM_MODEL_COOLDOWN_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+        os.replace(tmp_path, LLM_MODEL_COOLDOWN_FILE)
+    except Exception:
+        return
+
+
+def _llm_model_cooldown_remaining(entry: Dict[str, Any]) -> int:
+    try:
+        until = float(entry.get("cooldown_until") or 0.0)
+    except Exception:
+        until = 0.0
+    return max(0, int(round(until - time.time())))
+
+
+def _llm_model_active_cooldown_count() -> int:
+    if not LLM_MODEL_HEALTH_ENABLED:
+        return 0
+    state = _load_llm_model_health_state()
+    return sum(
+        1
+        for entry in state.get("models", {}).values()
+        if isinstance(entry, dict) and _llm_model_cooldown_remaining(entry) > 0
+    )
+
+
+def _llm_model_health_snapshot() -> Dict[str, Any]:
+    state = _load_llm_model_health_state()
+    models: List[Dict[str, Any]] = []
+    for key, entry in sorted((state.get("models") or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        item["key"] = key
+        item["cooldown_remaining_seconds"] = _llm_model_cooldown_remaining(entry)
+        item["cooling_down"] = item["cooldown_remaining_seconds"] > 0
+        models.append(item)
+    return {
+        "enabled": LLM_MODEL_HEALTH_ENABLED,
+        "fail_open": LLM_MODEL_FAIL_OPEN,
+        "active_cooldowns": len([item for item in models if item.get("cooling_down")]),
+        "models": models,
+    }
+
+
+def _llm_model_failure_category(failure_type: Optional[str], error: str = "") -> Optional[str]:
+    text = f"{failure_type or ''} {error or ''}".lower()
+    if not text.strip() or "expensive_fallback_blocked" in text or "model_cooling_down" in text:
+        return None
+    if "missing_api_key" in text or "authentication" in text or "unauthorized" in text or "invalid api key" in text:
+        return "auth"
+    if "ratelimit" in text or "rate limit" in text or "429" in text:
+        return "rate_limit"
+    if "timeout" in text or "timed out" in text or "budget_exhausted" in text:
+        return "timeout"
+    if "invalid_json" in text or "quality_invalid" in text or "validation" in text:
+        return "validation"
+    if "api" in text or "provider" in text or "http" in text or "5" in text[:3]:
+        return "provider_error"
+    return "other"
+
+
+def _llm_model_failure_threshold(category: str) -> int:
+    if category in ("auth", "rate_limit"):
+        return 1
+    if category == "validation":
+        return max(1, LLM_MODEL_VALIDATION_FAILURE_THRESHOLD)
+    return max(1, LLM_MODEL_FAILURE_THRESHOLD)
+
+
+def _llm_model_cooldown_seconds(category: str, retry_after_seconds: Optional[float] = None) -> int:
+    if category == "rate_limit":
+        base = retry_after_seconds if retry_after_seconds is not None else LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS
+    elif category == "auth":
+        base = LLM_MODEL_AUTH_COOLDOWN_SECONDS
+    elif category == "timeout":
+        base = LLM_MODEL_TIMEOUT_COOLDOWN_SECONDS
+    elif category == "validation":
+        base = LLM_MODEL_VALIDATION_COOLDOWN_SECONDS
+    elif category == "provider_error":
+        base = LLM_MODEL_PROVIDER_ERROR_COOLDOWN_SECONDS
+    else:
+        base = LLM_MODEL_TIMEOUT_COOLDOWN_SECONDS
+    return max(0, min(int(round(float(base or 0))), LLM_MODEL_COOLDOWN_MAX_SECONDS))
+
+
+def _mark_llm_model_success(spec: Dict[str, str], purpose: str) -> None:
+    if not LLM_MODEL_HEALTH_ENABLED:
+        return
+    state = _load_llm_model_health_state()
+    key = _llm_model_health_key(spec, purpose)
+    models = state.setdefault("models", {})
+    entry = dict(models.get(key) or {})
+    entry.update(
+        {
+            "provider": spec.get("provider"),
+            "model": spec.get("model"),
+            "purpose": purpose,
+            "consecutive_failures": 0,
+            "cooldown_until": 0.0,
+            "last_success_at": _llm_model_health_timestamp(),
+            "success_count_total": int(entry.get("success_count_total") or 0) + 1,
+        }
+    )
+    models[key] = entry
+    _write_llm_model_health_state(state)
+
+
+def _mark_llm_model_failure(
+    spec: Dict[str, str],
+    purpose: str,
+    failure_type: Optional[str],
+    *,
+    error: str = "",
+    reasons: Optional[List[str]] = None,
+    retry_after_seconds: Optional[float] = None,
+) -> None:
+    if not LLM_MODEL_HEALTH_ENABLED:
+        return
+    category = _llm_model_failure_category(failure_type, error)
+    if category is None:
+        return
+    state = _load_llm_model_health_state()
+    key = _llm_model_health_key(spec, purpose)
+    models = state.setdefault("models", {})
+    entry = dict(models.get(key) or {})
+    consecutive_failures = int(entry.get("consecutive_failures") or 0) + 1
+    threshold = _llm_model_failure_threshold(category)
+    cooldown_seconds = _llm_model_cooldown_seconds(category, retry_after_seconds)
+    existing_until = float(entry.get("cooldown_until") or 0.0)
+    cooldown_until = existing_until
+    if consecutive_failures >= threshold and cooldown_seconds > 0:
+        cooldown_until = max(existing_until, time.time() + cooldown_seconds)
+    entry.update(
+        {
+            "provider": spec.get("provider"),
+            "model": spec.get("model"),
+            "purpose": purpose,
+            "consecutive_failures": consecutive_failures,
+            "failure_count_total": int(entry.get("failure_count_total") or 0) + 1,
+            "last_failure_at": _llm_model_health_timestamp(),
+            "last_failure_type": failure_type,
+            "last_failure_category": category,
+            "last_error": "",
+            "last_reasons": [str(reason)[:200] for reason in (reasons or [])[:5]],
+            "cooldown_until": cooldown_until,
+            "cooldown_seconds": cooldown_seconds if cooldown_until > time.time() else 0,
+            "cooldown_threshold": threshold,
+        }
+    )
+    models[key] = entry
+    _write_llm_model_health_state(state)
+
+
+def _llm_candidate_specs_for_health(resolved_llm: Dict[str, Any], purpose: str) -> List[Dict[str, str]]:
+    specs = _build_llm_candidate_specs(resolved_llm)
+    if not LLM_MODEL_HEALTH_ENABLED or resolved_llm.get("model_explicitly_forced"):
+        return specs
+
+    healthy_specs: List[Dict[str, str]] = []
+    cooling_specs: List[Dict[str, Any]] = []
+    state = _load_llm_model_health_state()
+    models = state.get("models") or {}
+    for spec in specs:
+        entry = models.get(_llm_model_health_key(spec, purpose))
+        remaining = _llm_model_cooldown_remaining(entry) if isinstance(entry, dict) else 0
+        if remaining > 0:
+            cooling_specs.append({"spec": spec, "remaining": remaining})
+            _log_llm_attempt(
+                {
+                    "provider": spec["provider"],
+                    "model": spec["model"],
+                    "role": "skip",
+                    "success": None,
+                    "failure_type": "model_cooling_down",
+                    "cooldown_remaining_seconds": remaining,
+                    "purpose": purpose,
+                }
+            )
+        else:
+            healthy_specs.append(spec)
+
+    if healthy_specs:
+        return healthy_specs
+    if specs and LLM_MODEL_FAIL_OPEN:
+        chosen = min(cooling_specs, key=lambda item: int(item.get("remaining") or 0))["spec"] if cooling_specs else specs[0]
+        _log_llm_attempt(
+            {
+                "provider": chosen["provider"],
+                "model": chosen["model"],
+                "role": "skip",
+                "success": None,
+                "failure_type": "model_cooldown_override",
+                "purpose": purpose,
+            }
+        )
+        return [chosen]
+    return []
+
+
 def _extract_llm_response_payload(llm_resp: Any) -> Dict[str, Any]:
     raw = None
     finish_reason = None
@@ -3356,6 +3753,7 @@ async def _run_llm_orchestrator(
                 attempts.append(attempt)
                 _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
                 if validation["ok"]:
+                    _mark_llm_model_success(spec, purpose)
                     return {
                         "ok": True,
                         "parsed": validation["payload"],
@@ -3396,6 +3794,7 @@ async def _run_llm_orchestrator(
                         attempts.append(repair_attempt)
                         _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
                         if repair_validation["ok"]:
+                            _mark_llm_model_success(repair_spec, "repair")
                             return {
                                 "ok": True,
                                 "parsed": repair_validation["payload"],
@@ -3407,6 +3806,12 @@ async def _run_llm_orchestrator(
                                 "attempts": attempts,
                                 "repaired": True,
                             }
+                        _mark_llm_model_failure(
+                            repair_spec,
+                            "repair",
+                            repair_validation.get("failure_type"),
+                            reasons=repair_validation.get("reasons") or [],
+                        )
                     except Exception as repair_exc:
                         repair_attempt = {
                             "provider": spec["provider"],
@@ -3419,6 +3824,19 @@ async def _run_llm_orchestrator(
                         }
                         attempts.append(repair_attempt)
                         _log_llm_attempt({**repair_attempt, "purpose": purpose, "request_id": request_id})
+                        _mark_llm_model_failure(
+                            spec,
+                            "repair",
+                            type(repair_exc).__name__,
+                            error=str(repair_exc),
+                            retry_after_seconds=_extract_llm_retry_after_seconds(repair_exc),
+                        )
+                _mark_llm_model_failure(
+                    spec,
+                    purpose,
+                    validation.get("failure_type"),
+                    reasons=validation.get("reasons") or [],
+                )
                 break
             except Exception as exc:
                 attempt = {
@@ -3449,6 +3867,13 @@ async def _run_llm_orchestrator(
                     continue
                 attempts.append(attempt)
                 _log_llm_attempt({**attempt, "purpose": purpose, "request_id": request_id})
+                _mark_llm_model_failure(
+                    spec,
+                    purpose,
+                    type(exc).__name__,
+                    error=str(exc),
+                    retry_after_seconds=_extract_llm_retry_after_seconds(exc),
+                )
                 break
 
     return {

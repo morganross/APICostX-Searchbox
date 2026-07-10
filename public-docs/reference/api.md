@@ -20,7 +20,13 @@ Lightweight liveness check.
 curl -sS http://127.0.0.1:9000/health
 ```
 
-The response may include provider names, feature flags, and booleans indicating whether keys are configured. It must not include key values.
+The response may include provider names, feature flags, runtime failure ratios, and booleans indicating whether keys are configured. It must not include key values.
+
+`status` is one of:
+
+- `ok`: no obvious runtime degradation from current counters.
+- `degraded`: Searchbox is still serving, but provider, extraction, or LLM failures deserve attention.
+- `failing`: the primary search path appears unavailable.
 
 ## `GET /config`
 
@@ -161,7 +167,7 @@ Compatibility synthesis endpoint. Normal `/search` already generates the synthes
 
 ## `GET /health/monitor`
 
-Operational monitor. Returns provider usage, cooldowns, and recent event summaries.
+Operational monitor. Returns provider usage, cooldowns, recent event summaries, runtime failure ratios, recent provider/LLM failure ratios, and the policy used to mark the service degraded.
 
 ## `GET /logs/llm-attempts`
 
@@ -183,4 +189,31 @@ curl -sS 'http://127.0.0.1:9000/logs/provider-events?limit=100'
 
 ## `GET /search-raw`
 
-Compatibility endpoint for older callers. It delegates to the same one-result intelligent search contract as `/search`.
+Raw web-search endpoint for diagnostics and simple compatibility callers.
+
+```bash
+curl -sS 'http://127.0.0.1:9000/search-raw?q=perovskite%20solar%20cell&count=5'
+```
+
+The response is not the one-result aggregate context package. It returns:
+
+```json
+{
+  "query": "...",
+  "results": [
+    {
+      "title": "...",
+      "url": "https://example.test/page",
+      "content": "...",
+      "snippet": "...",
+      "published": null,
+      "source": "serper",
+      "rank": 1,
+      "score": 1.0
+    }
+  ],
+  "usage": {}
+}
+```
+
+Use `POST /search` for the stable aggregate Searchbox contract.

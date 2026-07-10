@@ -85,6 +85,16 @@ context = response["results"][0]["content"]
 
 The first result is a Searchbox aggregate context package. It may include web context, scientific context, extracted text summaries, and source listings.
 
+`/search` is the stable integration endpoint. Internal provider changes and refactors should preserve this contract unless a release includes explicit migration notes.
+
+For diagnostics or simple raw web-search use, Searchbox also exposes:
+
+```bash
+curl -sS 'http://127.0.0.1:9000/search-raw?q=lithium%20battery&count=5'
+```
+
+`/search-raw` returns a JSON object with `query`, `results`, and `usage`. Each result includes basic raw-search fields such as `title`, `url`, `content`, `snippet`, `source`, `rank`, and `score`; it does not provide the aggregate one-result context package.
+
 ## Configuration
 
 Start with `.env.example` and set only the providers you need. The one-result contract requires the summarizer path, so set `SUMMARIZER_ENABLED=true` and configure an LLM key for production-quality answers.
@@ -101,6 +111,18 @@ If Searchbox is exposed outside a trusted private network, enable auth:
 AUTH_DISABLED=false
 SEARCH_API_KEY=<strong random token>
 ```
+
+Do not expose a public Searchbox instance with `AUTH_DISABLED=true`.
+
+## Operational Health
+
+`/health` reports `status` as `ok`, `degraded`, or `failing`.
+
+- `ok` means the service has no obvious runtime degradation from its counters.
+- `degraded` means Searchbox is still serving, but provider, extraction, or LLM failure ratios deserve attention.
+- `failing` means the primary search path appears unavailable.
+
+`/health/monitor` includes recent provider and LLM failure ratios, cooldown snapshots, quota snapshots, and the health policy used to decide whether the service is degraded. When auth is enabled, monitor and log endpoints require authorization.
 
 ## Documentation
 
@@ -129,6 +151,8 @@ Searchbox uses the normal public-repo checks people expect from a serious Python
 - OpenSSF Scorecard workflow
 - Dependabot update checks
 - Community health files: contributing, security, code of conduct, issue templates, and PR template
+
+Secret scanning is a release gate. Real provider keys, `.env` files, local tokens, and captured credentials should stay outside the repository and out of test fixtures.
 
 ## Development
 
