@@ -929,6 +929,24 @@ async def _extract_content(url: str, timeout_s: float) -> Dict[str, Any]:
     return await extract_content(url, timeout_s, settings=_extraction_settings())
 
 
+def _failed_extract_result(url: str, exc: Exception, started_at: datetime) -> Dict[str, Any]:
+    detail = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
+    failure_reason = detail if isinstance(detail, str) else json.dumps(detail, sort_keys=True, default=str)
+    return {
+        "content": None,
+        "scraped": False,
+        "content_chars": 0,
+        "fetch_ms": int((datetime.now() - started_at).total_seconds() * 1000),
+        "error": failure_reason,
+        "extract_method": "failed",
+        "fetch_status": "failed",
+        "http_status": exc.status_code if isinstance(exc, HTTPException) else None,
+        "content_type": None,
+        "failure_reason": failure_reason,
+        "canonical_url": url,
+    }
+
+
 _ARXIV_STOPWORDS = {
     "about",
     "above",
@@ -2719,7 +2737,11 @@ async def _run_search(req: SearchRequest) -> List[SearchItem]:
                     "failure_reason": "empty_url",
                 }
             async with semaphore:
-                return await _extract_content(item.url, timeout_s=_resolve_timeout(req))
+                started_at = datetime.now()
+                try:
+                    return await _extract_content(item.url, timeout_s=_resolve_timeout(req))
+                except Exception as exc:
+                    return _failed_extract_result(item.url, exc, started_at)
 
         tasks = [guarded_extract(item) for item in to_fetch]
         scraped_data = await asyncio.gather(*tasks)
@@ -3656,6 +3678,33 @@ def _fetch_usage_attempts(results: List[SearchItem]) -> List[Dict[str, Any]]:
     return attempts
 
 
+def _searchbox_usage_headers(usage: Dict[str, Any], request_id: str) -> Dict[str, str]:
+    return {
+        "X-Request-ID": str(request_id or ""),
+        "X-Searchbox-Usage-Total-Cost": str(usage.get("total_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Search-Cost": str(usage.get("search_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Scrape-Cost": str(usage.get("scrape_cost_usd", 0.0)),
+        "X-Searchbox-Usage-LLM-Cost": str(usage.get("llm_cost_usd", 0.0)),
+        "X-Searchbox-Usage-Search-Requests": str(usage.get("search_requests", 0)),
+        "X-Searchbox-Usage-Scrape-Fetches": str(usage.get("scrape_fetches", 0)),
+        "X-Searchbox-Usage-Cost-Confidence": str(usage.get("cost_confidence", "")),
+        "X-Searchbox-Usage-LLM-Cost-Confidence": str(usage.get("llm_cost_confidence", "")),
+        "X-Searchbox-Usage-LLM-Cost-Source": str(usage.get("llm_cost_source", "")),
+        "X-Searchbox-Usage-LLM-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("llm") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Search-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("search") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Fetch-Attempts": str(
+            ((usage.get("usage_evidence") or {}).get("fetch") or {}).get("attempt_count", 0)
+        ),
+        "X-Searchbox-Usage-Evidence-Schema": str(
+            (usage.get("usage_evidence") or {}).get("schema_version", "")
+        ),
+    }
+
+
 @app.post("/search", response_model=TavilySearchResponse)
 async def search(req: SearchRequest, authorization: Optional[str] = Header(default=None)):
     _authorize(authorization, req.api_key)
@@ -3821,29 +3870,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
         _searchbox_usage=usage,
     )
 
-    headers = {
-        "X-Searchbox-Usage-Total-Cost": str(usage.get("total_cost_usd", 0.0)),
-        "X-Searchbox-Usage-Search-Cost": str(usage.get("search_cost_usd", 0.0)),
-        "X-Searchbox-Usage-Scrape-Cost": str(usage.get("scrape_cost_usd", 0.0)),
-        "X-Searchbox-Usage-LLM-Cost": str(usage.get("llm_cost_usd", 0.0)),
-        "X-Searchbox-Usage-Search-Requests": str(usage.get("search_requests", 0)),
-        "X-Searchbox-Usage-Scrape-Fetches": str(usage.get("scrape_fetches", 0)),
-        "X-Searchbox-Usage-Cost-Confidence": str(usage.get("cost_confidence", "")),
-        "X-Searchbox-Usage-LLM-Cost-Confidence": str(usage.get("llm_cost_confidence", "")),
-        "X-Searchbox-Usage-LLM-Cost-Source": str(usage.get("llm_cost_source", "")),
-        "X-Searchbox-Usage-LLM-Attempts": str(
-            ((usage.get("usage_evidence") or {}).get("llm") or {}).get("attempt_count", 0)
-        ),
-        "X-Searchbox-Usage-Search-Attempts": str(
-            ((usage.get("usage_evidence") or {}).get("search") or {}).get("attempt_count", 0)
-        ),
-        "X-Searchbox-Usage-Fetch-Attempts": str(
-            ((usage.get("usage_evidence") or {}).get("fetch") or {}).get("attempt_count", 0)
-        ),
-        "X-Searchbox-Usage-Evidence-Schema": str(
-            (usage.get("usage_evidence") or {}).get("schema_version", "")
-        ),
-    }
+    headers = _searchbox_usage_headers(usage, request_id)
 
     dumped = response_data.model_dump() if hasattr(response_data, "model_dump") else response_data.dict()
     # Filter out follow_up_questions/images/answer if None to match Tavily behavior
@@ -3894,17 +3921,64 @@ async def search_get(
 
 @app.get("/search-raw")
 async def search_raw(q: str, count: int = SERPER_DEFAULT_COUNT, authorization: Optional[str] = Header(default=None)):
+    _authorize(authorization)
+    _STATUS["requests_total"] += 1
+    request_id = str(uuid.uuid4())
+    usage_context = _REQUEST_USAGE_CONTEXT.get()
+    if isinstance(usage_context, dict):
+        usage_context["request_id"] = request_id
+
     requested_count = min(max(1, int(count or SERPER_DEFAULT_COUNT)), SERPER_MAX_COUNT)
     req = SearchRequest(
         query=q,
         count=requested_count,
         max_results=requested_count,
-        include_content=True,
-        include_raw_content=True,
-        include_answer=True,
+        include_content=False,
+        include_raw_content=False,
+        include_answer=False,
         include_usage=True,
     )
-    return await search(req, authorization=authorization)
+    results = await _run_search(req)
+    _record_usage_event(
+        "search",
+        {
+            "event": "web_search",
+            "component": "web",
+            "provider": SEARCH_PROVIDER,
+            "success": bool(results),
+            "requested_count": requested_count,
+            "result_count": len(results),
+        },
+    )
+
+    usage = _calculate_searchbox_usage(
+        provider=SEARCH_PROVIDER,
+        search_queries=1,
+        scrapes_http=0,
+        scrapes_playwright=0,
+        llm_usage=None,
+        llm_attempts=_current_usage_attempts("llm"),
+        search_attempts=_current_usage_attempts("search"),
+        fetch_attempts=[],
+    )
+    response = {
+        "query": q,
+        "results": [
+            {
+                "title": item.title,
+                "url": item.url,
+                "content": item.description or item.content or "",
+                "snippet": item.description or item.content or "",
+                "published": item.published,
+                "source": item.source or item.engine,
+                "rank": item.rank,
+                "score": item.score,
+            }
+            for item in results
+        ],
+        "usage": usage,
+    }
+    return JSONResponse(content=response, headers=_searchbox_usage_headers(usage, request_id))
 
 
 @app.post("/search-summary", response_model=SearchSummaryResponse)

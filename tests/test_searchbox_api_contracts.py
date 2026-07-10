@@ -151,10 +151,11 @@ async def test_post_search_keeps_web_aggregate_when_science_provider_layer_fails
 
 
 @pytest.mark.asyncio
-async def test_search_raw_uses_one_aggregate_summary_contract(monkeypatch):
+async def test_search_raw_returns_raw_results_without_summary_contract(monkeypatch):
     async def fake_run_search(req: main.SearchRequest):
-        assert req.include_content is True
-        assert req.include_raw_content is True
+        assert req.include_content is False
+        assert req.include_raw_content is False
+        assert req.include_answer is False
         return [_stub_item(source="serper", title="Raw compatibility source")]
 
     async def fake_classify(_query: str, _llm_options=None, request_id=None, **_kwargs):
@@ -173,12 +174,70 @@ async def test_search_raw_uses_one_aggregate_summary_contract(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
+    assert body["query"] == "compatibility query"
     assert len(body["results"]) == 1
-    assert body["answer"] == "Test summary synthesized from all returned sources."
     assert body["results"][0]["url"].startswith("https://")
-    assert body["results"][0]["searchbox_url"].startswith("searchbox://aggregate/")
-    assert "# Summary" in body["results"][0]["content"]
-    assert "# Web Context" in body["results"][0]["content"]
+    assert body["results"][0]["title"] == "Raw compatibility source"
+    assert body["results"][0]["content"] == "Example description"
+    assert body["results"][0]["snippet"] == "Example description"
+    assert body["usage"]["search_requests"] == 1
+    assert response.headers["X-Searchbox-Usage-Evidence-Schema"] == "searchbox-usage-evidence-v1"
+
+
+@pytest.mark.asyncio
+async def test_run_search_records_single_fetch_failure_without_aborting(monkeypatch):
+    async def fake_search_provider(_req: main.SearchRequest, _count: int):
+        return [
+            {
+                "rank": 1,
+                "title": "Bad host",
+                "url": "https://www.tesisenred.net/example",
+                "description": "This result cannot be resolved during fetch.",
+                "source": "serper",
+            },
+            {
+                "rank": 2,
+                "title": "Good host",
+                "url": "https://example.com/good",
+                "description": "This result can be fetched.",
+                "source": "serper",
+            },
+        ]
+
+    async def fake_extract_content(url: str, timeout_s: float):
+        if "tesisenred" in url:
+            raise main.HTTPException(status_code=400, detail="Could not resolve URL host: www.tesisenred.net")
+        return {
+            "content": "Useful extracted source text.",
+            "scraped": True,
+            "content_chars": 29,
+            "fetch_ms": 12,
+            "error": None,
+            "extract_method": "trafilatura",
+            "fetch_status": "ok",
+            "http_status": 200,
+            "content_type": "text/html",
+            "failure_reason": None,
+            "canonical_url": url,
+        }
+
+    monkeypatch.setattr(main, "_search_provider", fake_search_provider)
+    monkeypatch.setattr(main, "_extract_content", fake_extract_content)
+
+    results = await main._run_search(
+        main.SearchRequest(query="test query", count=2, max_results=2, include_content=True, fetch_top_n=2)
+    )
+
+    assert len(results) == 2
+    failed = next(item for item in results if "tesisenred" in item.url)
+    succeeded = next(item for item in results if "example.com" in item.url)
+    assert failed.scraped is False
+    assert failed.fetch_status == "failed"
+    assert failed.extract_method == "failed"
+    assert failed.failure_reason == "Could not resolve URL host: www.tesisenred.net"
+    assert failed.canonical_url == failed.url
+    assert succeeded.scraped is True
+    assert succeeded.fetch_status == "ok"
 
 
 def test_search_raw_rejects_missing_serper_key(monkeypatch):
