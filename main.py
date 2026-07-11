@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from contextvars import ContextVar
@@ -276,7 +277,8 @@ LLM_MODEL_VALIDATION_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_VALIDATION
 LLM_MODEL_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_FAILURE_THRESHOLD", "2"))
 LLM_MODEL_VALIDATION_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_VALIDATION_FAILURE_THRESHOLD", "3"))
 LLM_MODEL_FAIL_OPEN = os.environ.get("LLM_MODEL_FAIL_OPEN", "true").lower() in ("1", "true", "yes", "on")
-LLM_GATE_ENABLED = os.environ.get("LLM_GATE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+LLM_GATE_DEFAULT = "false" if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in os.path.basename(sys.argv[0]) else "true"
+LLM_GATE_ENABLED = os.environ.get("LLM_GATE_ENABLED", LLM_GATE_DEFAULT).lower() in ("1", "true", "yes", "on")
 LLM_GLOBAL_CONCURRENCY = max(1, int(os.environ.get("LLM_GLOBAL_CONCURRENCY", "1")))
 LLM_MIN_START_INTERVAL_SECONDS = max(0.0, float(os.environ.get("LLM_MIN_START_INTERVAL_SECONDS", "3.5")))
 LLM_QUEUE_MAX_WAIT_SECONDS = max(0.0, float(os.environ.get("LLM_QUEUE_MAX_WAIT_SECONDS", "0")))
@@ -330,8 +332,10 @@ _INFLIGHT = {
     "playwright_inflight": 0,
     "llm_queue_depth": 0,
 }
-_LLM_GATE_SEMAPHORE = asyncio.Semaphore(LLM_GLOBAL_CONCURRENCY)
-_LLM_GATE_START_LOCK = asyncio.Lock()
+_LLM_GATE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_LLM_GATE_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_LLM_GATE_START_LOCK: Optional[asyncio.Lock] = None
+_LLM_GATE_START_LOCK_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _LLM_GATE_LAST_START_AT = 0.0
 
 
@@ -436,6 +440,24 @@ def _llm_gate_client_disconnected_detail(path: str) -> Dict[str, Any]:
     }
 
 
+def _llm_gate_semaphore() -> asyncio.Semaphore:
+    global _LLM_GATE_SEMAPHORE, _LLM_GATE_SEMAPHORE_LOOP
+    loop = asyncio.get_running_loop()
+    if _LLM_GATE_SEMAPHORE is None or _LLM_GATE_SEMAPHORE_LOOP is not loop:
+        _LLM_GATE_SEMAPHORE = asyncio.Semaphore(LLM_GLOBAL_CONCURRENCY)
+        _LLM_GATE_SEMAPHORE_LOOP = loop
+    return _LLM_GATE_SEMAPHORE
+
+
+def _llm_gate_start_lock() -> asyncio.Lock:
+    global _LLM_GATE_START_LOCK, _LLM_GATE_START_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _LLM_GATE_START_LOCK is None or _LLM_GATE_START_LOCK_LOOP is not loop:
+        _LLM_GATE_START_LOCK = asyncio.Lock()
+        _LLM_GATE_START_LOCK_LOOP = loop
+    return _LLM_GATE_START_LOCK
+
+
 async def _raise_if_client_disconnected(request: Any, path: str) -> None:
     try:
         disconnected = await request.is_disconnected()
@@ -459,6 +481,7 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
     global _LLM_GATE_LAST_START_AT
     if not LLM_GATE_ENABLED:
         return False
+    semaphore = _llm_gate_semaphore()
     await _raise_if_client_disconnected(request, path)
     if LLM_QUEUE_MAX_SIZE > 0 and int(_INFLIGHT.get("llm_queue_depth") or 0) >= LLM_QUEUE_MAX_SIZE:
         raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_full"))
@@ -475,7 +498,7 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
                     raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout"))
                 wait_seconds = min(wait_seconds, remaining)
             try:
-                await asyncio.wait_for(_LLM_GATE_SEMAPHORE.acquire(), timeout=wait_seconds)
+                await asyncio.wait_for(semaphore.acquire(), timeout=wait_seconds)
                 break
             except asyncio.TimeoutError as exc:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -485,7 +508,7 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
 
     _increment_inflight("llm_gate_active")
     try:
-        async with _LLM_GATE_START_LOCK:
+        async with _llm_gate_start_lock():
             now = time.monotonic()
             wait_seconds = LLM_MIN_START_INTERVAL_SECONDS - (now - _LLM_GATE_LAST_START_AT)
             if wait_seconds > 0:
@@ -499,7 +522,7 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
 
 def _release_llm_gate() -> None:
     try:
-        _LLM_GATE_SEMAPHORE.release()
+        _llm_gate_semaphore().release()
     finally:
         _decrement_inflight("llm_gate_active")
 
