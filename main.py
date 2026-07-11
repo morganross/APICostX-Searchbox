@@ -248,12 +248,12 @@ LLM_FALLBACK_MODELS = [
     m.strip()
     for m in os.environ.get(
         "LLM_FALLBACK_MODELS",
-        "openrouter/moonshotai/kimi-k2.6:free,openrouter/openai/gpt-5-mini",
+        "openrouter/openai/gpt-5-mini",
     ).split(",")
     if m.strip()
 ]
 LLM_MAX_ATTEMPTS = int(os.environ.get("LLM_MAX_ATTEMPTS", "4"))  # 3 free + 1 paid backstop
-LLM_FREE_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_FREE_RATE_LIMIT_RETRIES", "1"))
+LLM_FREE_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_FREE_RATE_LIMIT_RETRIES", "0"))
 LLM_FREE_RATE_LIMIT_MAX_SLEEP = float(os.environ.get("LLM_FREE_RATE_LIMIT_MAX_SLEEP", "30"))
 LLM_MAX_REPAIR_ATTEMPTS = int(os.environ.get("LLM_MAX_REPAIR_ATTEMPTS", "1"))
 LLM_MAX_TOTAL_SECONDS = float(os.environ.get("LLM_MAX_TOTAL_SECONDS", "120"))  # free models can be slow
@@ -285,18 +285,6 @@ LLM_MIN_START_INTERVAL_SECONDS = max(0.0, float(os.environ.get("LLM_MIN_START_IN
 LLM_QUEUE_MAX_WAIT_SECONDS = max(0.0, float(os.environ.get("LLM_QUEUE_MAX_WAIT_SECONDS", "0")))
 LLM_QUEUE_MAX_SIZE = max(0, int(os.environ.get("LLM_QUEUE_MAX_SIZE", "0")))
 LLM_QUEUE_DISCONNECT_CHECK_SECONDS = max(0.1, float(os.environ.get("LLM_QUEUE_DISCONNECT_CHECK_SECONDS", "1.0")))
-SEARCHBOX_DEGRADE_UNDER_LOAD = os.environ.get("SEARCHBOX_DEGRADE_UNDER_LOAD", "true").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD = max(
-    2, int(os.environ.get("SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD", "2"))
-)
-SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS = max(1, int(os.environ.get("SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS", "1")))
-SEARCHBOX_DEGRADE_HOLD_SECONDS = max(0.0, float(os.environ.get("SEARCHBOX_DEGRADE_HOLD_SECONDS", "15")))
-_SEARCHBOX_DEGRADE_UNTIL_MONOTONIC = 0.0
 LLM_SYSTEM_PROMPT = os.environ.get(
     "LLM_SYSTEM_PROMPT",
     'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.',
@@ -335,6 +323,8 @@ _STATUS = {
     "llm_success_total": 0,
     "llm_error_total": 0,
     "last_error": None,
+    "active_search_phase": None,
+    "active_search_request_id": None,
 }
 _INFLIGHT = {
     "http_requests_inflight": 0,
@@ -396,7 +386,7 @@ async def _usage_context_middleware(request, call_next):
         }
     )
     try:
-        should_gate = request_path == "/search-summary"
+        should_gate = request_path in ("/search", "/search-summary")
         if should_gate:
             llm_gate_acquired = await _acquire_llm_gate_or_429(request_path, request)
         return await call_next(request)
@@ -429,44 +419,6 @@ def _decrement_inflight(name: str, amount: int = 1) -> None:
 
 def _inflight_snapshot() -> Dict[str, int]:
     return {name: int(value or 0) for name, value in sorted(_INFLIGHT.items())}
-
-
-def _searchbox_degrade_under_load() -> bool:
-    global _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC
-    if not SEARCHBOX_DEGRADE_UNDER_LOAD:
-        return False
-    now = time.monotonic()
-    search_inflight = int(_INFLIGHT.get("search_requests_inflight") or 0)
-    if search_inflight >= SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD:
-        _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC = max(
-            _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC,
-            now + SEARCHBOX_DEGRADE_HOLD_SECONDS,
-        )
-        return True
-    return now < _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC
-
-
-def _fast_degraded_summary(query: str, items: List[SearchItem], reason: str) -> Dict[str, Any]:
-    sources = [item.url for item in items if item.url]
-    highlights = [item.title for item in items if item.title][:3]
-    return {
-        "found": bool(items),
-        "answer": "Searchbox returned fast web context because the full LLM research path is busy.",
-        "highlights": highlights,
-        "follow_up_questions": [],
-        "open_questions": [],
-        "sources": sources,
-        "excluded_results": [],
-        "confidence": 0.35 if items else 0.0,
-        "retrieval_notes": [
-            {
-                "type": "degraded_fast_response",
-                "reason": reason,
-                "query": query,
-                "message": "Full classifier, science fanout, extraction, and LLM synthesis were skipped to keep Searchbox responsive under load.",
-            }
-        ],
-    }
 
 
 def _llm_gate_busy_detail(reason: str) -> Dict[str, Any]:
@@ -534,7 +486,6 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
     if not LLM_GATE_ENABLED:
         return False
     semaphore = _llm_gate_semaphore()
-    await _raise_if_client_disconnected(request, path)
     if LLM_QUEUE_MAX_SIZE > 0 and int(_INFLIGHT.get("llm_queue_depth") or 0) >= LLM_QUEUE_MAX_SIZE:
         raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_full"))
 
@@ -542,7 +493,6 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
     _increment_inflight("llm_queue_depth")
     try:
         while True:
-            await _raise_if_client_disconnected(request, path)
             wait_seconds = LLM_QUEUE_DISCONNECT_CHECK_SECONDS
             if deadline is not None:
                 remaining = deadline - time.monotonic()
@@ -564,7 +514,7 @@ async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
             now = time.monotonic()
             wait_seconds = LLM_MIN_START_INTERVAL_SECONDS - (now - _LLM_GATE_LAST_START_AT)
             if wait_seconds > 0:
-                await _sleep_with_disconnect_checks(request, path, wait_seconds)
+                await asyncio.sleep(wait_seconds)
             _LLM_GATE_LAST_START_AT = time.monotonic()
         return True
     except Exception:
@@ -815,10 +765,6 @@ def config() -> Dict[str, Any]:
             "llm_queue_max_wait_seconds": LLM_QUEUE_MAX_WAIT_SECONDS,
             "llm_queue_max_size": LLM_QUEUE_MAX_SIZE,
             "llm_queue_disconnect_check_seconds": LLM_QUEUE_DISCONNECT_CHECK_SECONDS,
-            "degrade_under_load": SEARCHBOX_DEGRADE_UNDER_LOAD,
-            "degrade_search_inflight_threshold": SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD,
-            "degrade_web_context_results": SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS,
-            "degrade_hold_seconds": SEARCHBOX_DEGRADE_HOLD_SECONDS,
             "response_format_default": LLM_RESPONSE_FORMAT,
             "repair_timeout_default": LLM_REPAIR_TIMEOUT,
             "request_options_enabled": LLM_ALLOW_REQUEST_OPTIONS,
@@ -1156,10 +1102,6 @@ async def _normalize_search_query(req: Any) -> str:
         return query
 
     if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE:
-        if SEARCHBOX_DEGRADE_UNDER_LOAD:
-            await asyncio.sleep(0)
-        if _searchbox_degrade_under_load():
-            return query
         try:
             resolved_llm = _resolve_llm_options(getattr(req, "llm_options", None))
             system_prompt = (
@@ -3149,8 +3091,26 @@ async def _run_search(req: SearchRequest) -> List[SearchItem]:
                 except Exception as exc:
                     return _failed_extract_result(item.url, exc, started_at)
 
-        tasks = [guarded_extract(item) for item in to_fetch]
-        scraped_data = await asyncio.gather(*tasks)
+        fetch_started_at = datetime.now()
+        tasks = [asyncio.create_task(guarded_extract(item)) for item in to_fetch]
+        try:
+            scraped_data = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=max(1.0, _resolve_timeout(req)) + 5.0,
+            )
+        except asyncio.TimeoutError as exc:
+            for task in tasks:
+                task.cancel()
+            scraped_data = []
+            for item, task in zip(to_fetch, tasks):
+                if task.done() and not task.cancelled():
+                    try:
+                        scraped_data.append(task.result())
+                        continue
+                    except Exception as task_exc:
+                        scraped_data.append(_failed_extract_result(item.url, task_exc, fetch_started_at))
+                        continue
+                scraped_data.append(_failed_extract_result(item.url, exc, fetch_started_at))
         for item, scraped in zip(to_fetch, scraped_data):
             item.scraped = bool(scraped.get("scraped"))
             item.content_chars = int(scraped.get("content_chars") or 0)
@@ -3588,6 +3548,8 @@ def _llm_model_failure_category(failure_type: Optional[str], error: str = "") ->
         return None
     if "missing_api_key" in text or "authentication" in text or "unauthorized" in text or "invalid api key" in text:
         return "auth"
+    if "notfound" in text or "not found" in text or "404" in text or "unavailable for free" in text:
+        return "auth"
     if "ratelimit" in text or "rate limit" in text or "429" in text:
         return "rate_limit"
     if "timeout" in text or "timed out" in text or "budget_exhausted" in text:
@@ -3609,7 +3571,7 @@ def _llm_model_failure_threshold(category: str) -> int:
 
 def _llm_model_cooldown_seconds(category: str, retry_after_seconds: Optional[float] = None) -> int:
     if category == "rate_limit":
-        base = retry_after_seconds if retry_after_seconds is not None else LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS
+        base = max(float(retry_after_seconds or 0), float(LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS))
     elif category == "auth":
         base = LLM_MODEL_AUTH_COOLDOWN_SECONDS
     elif category == "timeout":
@@ -4385,14 +4347,11 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     usage_context = _REQUEST_USAGE_CONTEXT.get()
     if isinstance(usage_context, dict):
         usage_context["request_id"] = request_id
+    _STATUS["active_search_request_id"] = request_id
+    _STATUS["active_search_phase"] = "prepare"
 
     requested_results = req.max_results or req.count or 1
-    degraded_fast = _searchbox_degrade_under_load()
-    if not degraded_fast and SEARCHBOX_DEGRADE_UNDER_LOAD:
-        await asyncio.sleep(0)
-        degraded_fast = _searchbox_degrade_under_load()
-    web_context_floor = SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS if degraded_fast else SEARCHBOX_WEB_CONTEXT_RESULTS
-    web_context_count = min(SERPER_MAX_COUNT, max(web_context_floor, int(requested_results or 1)))
+    web_context_count = min(SERPER_MAX_COUNT, max(SEARCHBOX_WEB_CONTEXT_RESULTS, int(requested_results or 1)))
     search_req = SearchRequest(**_model_dict(req))
     search_req.count = web_context_count
     search_req.max_results = web_context_count
@@ -4400,21 +4359,22 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     # advanced_search=false/no field no longer disables science detection.
     forced_science = bool(search_req.advanced_search is True)
 
-    # Searchbox always returns one complete research context. Engine-native
-    # request knobs are accepted for compatibility, but content extraction and
-    # summarization are non-configurable for ACM callers.
-    search_req.include_content = not degraded_fast
-    search_req.include_raw_content = not degraded_fast
-    if search_req.fetch_top_n is None:
-        search_req.fetch_top_n = 1 if degraded_fast else web_context_count
+    # Searchbox returns a complete answer, but full page extraction is an
+    # explicit request knob. Default searches use provider snippets so one
+    # hostile/slow page cannot block the whole turn.
+    search_req.include_content = _resolve_include_content(req, default=False)
+    search_req.include_raw_content = bool(getattr(req, "include_raw_content", False))
+    if search_req.include_content and search_req.fetch_top_n is None:
+        search_req.fetch_top_n = web_context_count
 
     web_req = SearchRequest(**_model_dict(search_req))
     web_req.advanced_search = False
     web_req.topic = req.topic
-    web_req.include_content = not degraded_fast
-    web_req.fetch_top_n = web_context_count
+    web_req.include_content = search_req.include_content
+    web_req.fetch_top_n = search_req.fetch_top_n
     web_req.count = web_context_count
     web_req.max_results = web_context_count
+    _STATUS["active_search_phase"] = "web_search"
     web_results = await _run_search(web_req)
     _record_usage_event(
         "search",
@@ -4427,19 +4387,17 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
             "result_count": len(web_results),
         },
     )
-    if not degraded_fast and _searchbox_degrade_under_load():
-        degraded_fast = True
     classifier_result = (
-        {"is_science": False, "confidence": 0.0, "reason": "degraded_fast_response"}
-        if degraded_fast
-        else (
-            {"is_science": True, "confidence": 1.0, "reason": "advanced_search_force_override"}
-            if forced_science
-            else await _classify_science_query(req.query, req.llm_options, request_id=request_id)
-        )
+        {"is_science": True, "confidence": 1.0, "reason": "advanced_search_force_override"}
+        if forced_science
+        else None
     )
+    if classifier_result is None:
+        _STATUS["active_search_phase"] = "science_classifier"
+        classifier_result = await _classify_science_query(req.query, req.llm_options, request_id=request_id)
     use_science = bool(classifier_result.get("is_science"))
     if use_science:
+        _STATUS["active_search_phase"] = "science_search"
         science_req = SearchRequest(**_model_dict(search_req))
         science_req.advanced_search = True
         science_req.topic = "auto"
@@ -4489,20 +4447,15 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     search_req.advanced_search = use_science
     results = web_results + advanced_results
 
-    if not degraded_fast and _searchbox_degrade_under_load():
-        degraded_fast = True
-    summary_payload = (
-        _fast_degraded_summary(req.query, results, "searchbox_under_load")
-        if degraded_fast
-        else await _summarize_query(
-            query=req.query,
-            items=results,
-            max_sources=max(1, len(results)),
-            max_chars_per_source=_resolve_max_chars_per_source(req),
-            llm_options=req.llm_options,
-            debug=_resolve_debug(req),
-            include_usage=True,
-        )
+    _STATUS["active_search_phase"] = "summary"
+    summary_payload = await _summarize_query(
+        query=req.query,
+        items=results,
+        max_sources=max(1, len(results)),
+        max_chars_per_source=_resolve_max_chars_per_source(req),
+        llm_options=req.llm_options,
+        debug=_resolve_debug(req),
+        include_usage=True,
     )
     answer = summary_payload.get("answer") if isinstance(summary_payload, dict) else None
 
@@ -4572,6 +4525,8 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     if dumped.get("usage") is None:
         dumped.pop("usage", None)
 
+    _STATUS["active_search_phase"] = None
+    _STATUS["active_search_request_id"] = None
     return JSONResponse(content=dumped, headers=headers)
 
 
