@@ -279,8 +279,8 @@ LLM_MODEL_FAIL_OPEN = os.environ.get("LLM_MODEL_FAIL_OPEN", "true").lower() in (
 LLM_GATE_ENABLED = os.environ.get("LLM_GATE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 LLM_GLOBAL_CONCURRENCY = max(1, int(os.environ.get("LLM_GLOBAL_CONCURRENCY", "1")))
 LLM_MIN_START_INTERVAL_SECONDS = max(0.0, float(os.environ.get("LLM_MIN_START_INTERVAL_SECONDS", "3.5")))
-LLM_QUEUE_MAX_WAIT_SECONDS = max(0.0, float(os.environ.get("LLM_QUEUE_MAX_WAIT_SECONDS", "45")))
-LLM_QUEUE_MAX_SIZE = max(0, int(os.environ.get("LLM_QUEUE_MAX_SIZE", "8")))
+LLM_QUEUE_MAX_WAIT_SECONDS = max(0.0, float(os.environ.get("LLM_QUEUE_MAX_WAIT_SECONDS", "0")))
+LLM_QUEUE_MAX_SIZE = max(0, int(os.environ.get("LLM_QUEUE_MAX_SIZE", "0")))
 LLM_SYSTEM_PROMPT = os.environ.get(
     "LLM_SYSTEM_PROMPT",
     'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.',
@@ -429,15 +429,18 @@ async def _acquire_llm_gate_or_429(path: str) -> bool:
     global _LLM_GATE_LAST_START_AT
     if not LLM_GATE_ENABLED:
         return False
-    if int(_INFLIGHT.get("llm_queue_depth") or 0) >= LLM_QUEUE_MAX_SIZE:
+    if LLM_QUEUE_MAX_SIZE > 0 and int(_INFLIGHT.get("llm_queue_depth") or 0) >= LLM_QUEUE_MAX_SIZE:
         raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_full"))
 
     _increment_inflight("llm_queue_depth")
     try:
-        try:
-            await asyncio.wait_for(_LLM_GATE_SEMAPHORE.acquire(), timeout=LLM_QUEUE_MAX_WAIT_SECONDS)
-        except asyncio.TimeoutError as exc:
-            raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout")) from exc
+        if LLM_QUEUE_MAX_WAIT_SECONDS > 0:
+            try:
+                await asyncio.wait_for(_LLM_GATE_SEMAPHORE.acquire(), timeout=LLM_QUEUE_MAX_WAIT_SECONDS)
+            except asyncio.TimeoutError as exc:
+                raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout")) from exc
+        else:
+            await _LLM_GATE_SEMAPHORE.acquire()
     finally:
         _decrement_inflight("llm_queue_depth")
 
