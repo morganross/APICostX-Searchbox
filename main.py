@@ -281,6 +281,7 @@ LLM_GLOBAL_CONCURRENCY = max(1, int(os.environ.get("LLM_GLOBAL_CONCURRENCY", "1"
 LLM_MIN_START_INTERVAL_SECONDS = max(0.0, float(os.environ.get("LLM_MIN_START_INTERVAL_SECONDS", "3.5")))
 LLM_QUEUE_MAX_WAIT_SECONDS = max(0.0, float(os.environ.get("LLM_QUEUE_MAX_WAIT_SECONDS", "0")))
 LLM_QUEUE_MAX_SIZE = max(0, int(os.environ.get("LLM_QUEUE_MAX_SIZE", "0")))
+LLM_QUEUE_DISCONNECT_CHECK_SECONDS = max(0.1, float(os.environ.get("LLM_QUEUE_DISCONNECT_CHECK_SECONDS", "1.0")))
 LLM_SYSTEM_PROMPT = os.environ.get(
     "LLM_SYSTEM_PROMPT",
     'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.',
@@ -379,12 +380,12 @@ async def _usage_context_middleware(request, call_next):
     )
     try:
         if request_path in ("/search", "/search-summary"):
-            llm_gate_acquired = await _acquire_llm_gate_or_429(request_path)
+            llm_gate_acquired = await _acquire_llm_gate_or_429(request_path, request)
         return await call_next(request)
     except HTTPException as exc:
-        if exc.status_code == 429:
+        if exc.status_code in (429, 499):
             return JSONResponse(
-                status_code=429,
+                status_code=exc.status_code,
                 content={
                     "detail": exc.detail,
                     "inflight": _inflight_snapshot(),
@@ -422,25 +423,63 @@ def _llm_gate_busy_detail(reason: str) -> Dict[str, Any]:
         "llm_min_start_interval_seconds": LLM_MIN_START_INTERVAL_SECONDS,
         "llm_queue_max_wait_seconds": LLM_QUEUE_MAX_WAIT_SECONDS,
         "llm_queue_max_size": LLM_QUEUE_MAX_SIZE,
+        "llm_queue_disconnect_check_seconds": LLM_QUEUE_DISCONNECT_CHECK_SECONDS,
     }
 
 
-async def _acquire_llm_gate_or_429(path: str) -> bool:
+def _llm_gate_client_disconnected_detail(path: str) -> Dict[str, Any]:
+    return {
+        "error": "searchbox_client_disconnected",
+        "reason": "client_disconnected",
+        "message": "The client disconnected while waiting for the LLM-backed search gate.",
+        "path": path,
+    }
+
+
+async def _raise_if_client_disconnected(request: Any, path: str) -> None:
+    try:
+        disconnected = await request.is_disconnected()
+    except Exception:
+        disconnected = False
+    if disconnected:
+        raise HTTPException(status_code=499, detail=_llm_gate_client_disconnected_detail(path))
+
+
+async def _sleep_with_disconnect_checks(request: Any, path: str, seconds: float) -> None:
+    remaining = max(0.0, float(seconds or 0.0))
+    while remaining > 0:
+        await _raise_if_client_disconnected(request, path)
+        step = min(remaining, LLM_QUEUE_DISCONNECT_CHECK_SECONDS)
+        await asyncio.sleep(step)
+        remaining -= step
+    await _raise_if_client_disconnected(request, path)
+
+
+async def _acquire_llm_gate_or_429(path: str, request: Any) -> bool:
     global _LLM_GATE_LAST_START_AT
     if not LLM_GATE_ENABLED:
         return False
+    await _raise_if_client_disconnected(request, path)
     if LLM_QUEUE_MAX_SIZE > 0 and int(_INFLIGHT.get("llm_queue_depth") or 0) >= LLM_QUEUE_MAX_SIZE:
         raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_full"))
 
+    deadline = time.monotonic() + LLM_QUEUE_MAX_WAIT_SECONDS if LLM_QUEUE_MAX_WAIT_SECONDS > 0 else None
     _increment_inflight("llm_queue_depth")
     try:
-        if LLM_QUEUE_MAX_WAIT_SECONDS > 0:
+        while True:
+            await _raise_if_client_disconnected(request, path)
+            wait_seconds = LLM_QUEUE_DISCONNECT_CHECK_SECONDS
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout"))
+                wait_seconds = min(wait_seconds, remaining)
             try:
-                await asyncio.wait_for(_LLM_GATE_SEMAPHORE.acquire(), timeout=LLM_QUEUE_MAX_WAIT_SECONDS)
+                await asyncio.wait_for(_LLM_GATE_SEMAPHORE.acquire(), timeout=wait_seconds)
+                break
             except asyncio.TimeoutError as exc:
-                raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout")) from exc
-        else:
-            await _LLM_GATE_SEMAPHORE.acquire()
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HTTPException(status_code=429, detail=_llm_gate_busy_detail("queue_timeout")) from exc
     finally:
         _decrement_inflight("llm_queue_depth")
 
@@ -450,7 +489,7 @@ async def _acquire_llm_gate_or_429(path: str) -> bool:
             now = time.monotonic()
             wait_seconds = LLM_MIN_START_INTERVAL_SECONDS - (now - _LLM_GATE_LAST_START_AT)
             if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
+                await _sleep_with_disconnect_checks(request, path, wait_seconds)
             _LLM_GATE_LAST_START_AT = time.monotonic()
         return True
     except Exception:
@@ -700,6 +739,7 @@ def config() -> Dict[str, Any]:
             "llm_min_start_interval_seconds": LLM_MIN_START_INTERVAL_SECONDS,
             "llm_queue_max_wait_seconds": LLM_QUEUE_MAX_WAIT_SECONDS,
             "llm_queue_max_size": LLM_QUEUE_MAX_SIZE,
+            "llm_queue_disconnect_check_seconds": LLM_QUEUE_DISCONNECT_CHECK_SECONDS,
             "response_format_default": LLM_RESPONSE_FORMAT,
             "repair_timeout_default": LLM_REPAIR_TIMEOUT,
             "request_options_enabled": LLM_ALLOW_REQUEST_OPTIONS,
