@@ -242,6 +242,7 @@ OPENROUTER_API_BASE = os.environ.get("OPENROUTER_API_BASE", "https://openrouter.
 OPENROUTER_MODEL_CHEAP = os.environ.get("OPENROUTER_MODEL_CHEAP", "openrouter/qwen/qwen3-coder:free").strip()
 OPENROUTER_MODEL_BALANCED = os.environ.get("OPENROUTER_MODEL_BALANCED", "openrouter/qwen/qwen3-coder:free").strip()
 OPENROUTER_MODEL_BEST = os.environ.get("OPENROUTER_MODEL_BEST", "openrouter/openai/gpt-5-mini").strip()
+_RUNTIME_IS_PYTEST = bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in os.path.basename(sys.argv[0]))
 # Fallback cascade: more free capacity first, then GPT-5 Mini as the paid backstop.
 LLM_FALLBACK_MODELS = [
     m.strip()
@@ -266,7 +267,7 @@ LLM_REPAIR_MODEL = os.environ.get("LLM_REPAIR_MODEL", "").strip() or None
 LLM_RESPONSE_FORMAT = os.environ.get("LLM_RESPONSE_FORMAT", "auto").strip().lower()
 LLM_MODEL_HEALTH_ENABLED = os.environ.get("LLM_MODEL_HEALTH_ENABLED", "true").lower() in ("1", "true", "yes", "on")
 LLM_MODEL_COOLDOWN_FILE = os.environ.get(
-    "LLM_MODEL_COOLDOWN_FILE", str(BASE_DIR / "data" / "llm_model_cooldowns.json")
+    "LLM_MODEL_COOLDOWN_FILE", "" if _RUNTIME_IS_PYTEST else str(BASE_DIR / "data" / "llm_model_cooldowns.json")
 ).strip()
 LLM_MODEL_COOLDOWN_MAX_SECONDS = int(os.environ.get("LLM_MODEL_COOLDOWN_MAX_SECONDS", "3600"))
 LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_RATE_LIMIT_COOLDOWN_SECONDS", "900"))
@@ -277,7 +278,7 @@ LLM_MODEL_VALIDATION_COOLDOWN_SECONDS = int(os.environ.get("LLM_MODEL_VALIDATION
 LLM_MODEL_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_FAILURE_THRESHOLD", "2"))
 LLM_MODEL_VALIDATION_FAILURE_THRESHOLD = int(os.environ.get("LLM_MODEL_VALIDATION_FAILURE_THRESHOLD", "3"))
 LLM_MODEL_FAIL_OPEN = os.environ.get("LLM_MODEL_FAIL_OPEN", "true").lower() in ("1", "true", "yes", "on")
-LLM_GATE_DEFAULT = "false" if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in os.path.basename(sys.argv[0]) else "true"
+LLM_GATE_DEFAULT = "false" if _RUNTIME_IS_PYTEST else "true"
 LLM_GATE_ENABLED = os.environ.get("LLM_GATE_ENABLED", LLM_GATE_DEFAULT).lower() in ("1", "true", "yes", "on")
 LLM_GLOBAL_CONCURRENCY = max(1, int(os.environ.get("LLM_GLOBAL_CONCURRENCY", "1")))
 LLM_MIN_START_INTERVAL_SECONDS = max(0.0, float(os.environ.get("LLM_MIN_START_INTERVAL_SECONDS", "3.5")))
@@ -294,6 +295,8 @@ SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD = max(
     2, int(os.environ.get("SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD", "2"))
 )
 SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS = max(1, int(os.environ.get("SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS", "1")))
+SEARCHBOX_DEGRADE_HOLD_SECONDS = max(0.0, float(os.environ.get("SEARCHBOX_DEGRADE_HOLD_SECONDS", "15")))
+_SEARCHBOX_DEGRADE_UNTIL_MONOTONIC = 0.0
 LLM_SYSTEM_PROMPT = os.environ.get(
     "LLM_SYSTEM_PROMPT",
     'You are a strict evidence-aware research synthesis model. Use only the provided sources. Never invent claims.\nNever use markdown, bullets, fences, or prose. Return ONLY a single valid JSON object matching the following structure:\n\n{\n  "found": true,\n  "answer": "A detailed paragraph summarizing the findings based purely on the evidence. Target 700 words.",\n  "highlights": ["Key fact 1", "Key fact 2"],\n  "follow_up_questions": ["Follow up question 1?", "Follow up question 2?"],\n  "confidence": 0.95\n}\n\nEnsure all returned JSON fields conform exactly to this structure. If no sources are usable, set found=false, confidence=0.0, and explain the lack of info in the answer field.',
@@ -393,9 +396,7 @@ async def _usage_context_middleware(request, call_next):
         }
     )
     try:
-        should_gate = request_path in ("/search", "/search-summary")
-        if request_path == "/search" and _searchbox_degrade_under_load():
-            should_gate = False
+        should_gate = request_path == "/search-summary"
         if should_gate:
             llm_gate_acquired = await _acquire_llm_gate_or_429(request_path, request)
         return await call_next(request)
@@ -431,9 +432,18 @@ def _inflight_snapshot() -> Dict[str, int]:
 
 
 def _searchbox_degrade_under_load() -> bool:
+    global _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC
     if not SEARCHBOX_DEGRADE_UNDER_LOAD:
         return False
-    return int(_INFLIGHT.get("search_requests_inflight") or 0) >= SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD
+    now = time.monotonic()
+    search_inflight = int(_INFLIGHT.get("search_requests_inflight") or 0)
+    if search_inflight >= SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD:
+        _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC = max(
+            _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC,
+            now + SEARCHBOX_DEGRADE_HOLD_SECONDS,
+        )
+        return True
+    return now < _SEARCHBOX_DEGRADE_UNTIL_MONOTONIC
 
 
 def _fast_degraded_summary(query: str, items: List[SearchItem], reason: str) -> Dict[str, Any]:
@@ -808,6 +818,7 @@ def config() -> Dict[str, Any]:
             "degrade_under_load": SEARCHBOX_DEGRADE_UNDER_LOAD,
             "degrade_search_inflight_threshold": SEARCHBOX_DEGRADE_SEARCH_INFLIGHT_THRESHOLD,
             "degrade_web_context_results": SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS,
+            "degrade_hold_seconds": SEARCHBOX_DEGRADE_HOLD_SECONDS,
             "response_format_default": LLM_RESPONSE_FORMAT,
             "repair_timeout_default": LLM_REPAIR_TIMEOUT,
             "request_options_enabled": LLM_ALLOW_REQUEST_OPTIONS,
@@ -1144,7 +1155,11 @@ async def _normalize_search_query(req: Any) -> str:
     if len(words) <= 15:
         return query
 
-    if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE and not _searchbox_degrade_under_load():
+    if SUMMARIZER_ENABLED and _LITELLM_AVAILABLE:
+        if SEARCHBOX_DEGRADE_UNDER_LOAD:
+            await asyncio.sleep(0)
+        if _searchbox_degrade_under_load():
+            return query
         try:
             resolved_llm = _resolve_llm_options(getattr(req, "llm_options", None))
             system_prompt = (
@@ -4373,6 +4388,9 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
 
     requested_results = req.max_results or req.count or 1
     degraded_fast = _searchbox_degrade_under_load()
+    if not degraded_fast and SEARCHBOX_DEGRADE_UNDER_LOAD:
+        await asyncio.sleep(0)
+        degraded_fast = _searchbox_degrade_under_load()
     web_context_floor = SEARCHBOX_DEGRADE_WEB_CONTEXT_RESULTS if degraded_fast else SEARCHBOX_WEB_CONTEXT_RESULTS
     web_context_count = min(SERPER_MAX_COUNT, max(web_context_floor, int(requested_results or 1)))
     search_req = SearchRequest(**_model_dict(req))
@@ -4388,7 +4406,7 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     search_req.include_content = not degraded_fast
     search_req.include_raw_content = not degraded_fast
     if search_req.fetch_top_n is None:
-        search_req.fetch_top_n = 0 if degraded_fast else web_context_count
+        search_req.fetch_top_n = 1 if degraded_fast else web_context_count
 
     web_req = SearchRequest(**_model_dict(search_req))
     web_req.advanced_search = False
@@ -4409,6 +4427,8 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
             "result_count": len(web_results),
         },
     )
+    if not degraded_fast and _searchbox_degrade_under_load():
+        degraded_fast = True
     classifier_result = (
         {"is_science": False, "confidence": 0.0, "reason": "degraded_fast_response"}
         if degraded_fast
@@ -4469,6 +4489,8 @@ async def search(req: SearchRequest, authorization: Optional[str] = Header(defau
     search_req.advanced_search = use_science
     results = web_results + advanced_results
 
+    if not degraded_fast and _searchbox_degrade_under_load():
+        degraded_fast = True
     summary_payload = (
         _fast_degraded_summary(req.query, results, "searchbox_under_load")
         if degraded_fast
