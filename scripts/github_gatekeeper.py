@@ -12,7 +12,7 @@ def git(*args: str) -> str:
 
 
 def changed_files() -> list[str]:
-    base_branch = os.environ.get("GITHUB_BASE_REF") or "open-source-productization"
+    base_branch = os.environ.get("GITHUB_BASE_REF") or "main"
     base = f"origin/{base_branch}"
     try:
         out = git("diff", "--name-only", "--diff-filter=ACMRTUXB", f"{base}...HEAD")
