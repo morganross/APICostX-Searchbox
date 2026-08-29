@@ -1,0 +1,19 @@
+[Unit]
+Description=Codex Exec API Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/codex-api-runner
+EnvironmentFile=/home/ubuntu/codex-api-runner/.env
+ExecStart=/home/ubuntu/codex-api-runner/.venv/bin/uvicorn app:APP --host 10.0.1.209 --port 8765
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
