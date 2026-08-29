@@ -31,6 +31,7 @@ The repository-level `.gitignore` excludes `.env` and all `data/` directories.
 
 ```bash
 sudo install -d -o ubuntu -g ubuntu /home/ubuntu/codex-api-runner
+sudo npm install -g @openai/codex@0.151.0
 python3 -m venv /home/ubuntu/codex-api-runner/.venv
 /home/ubuntu/codex-api-runner/.venv/bin/pip install -r requirements.txt
 cp app.py requirements.txt /home/ubuntu/codex-api-runner/
@@ -77,3 +78,7 @@ sandboxes, concurrency, prompt size, and timeout behavior are defined in
 The service was originally deployed with Uvicorn from the Searchbox virtual
 environment. The checked-in unit gives CodexExecAPI its own `.venv` so future
 Searchbox dependency changes cannot silently alter this service.
+
+GPT-5.6 requires Codex CLI `0.151.0` or newer. The production runner uses the
+global npm installation at `/usr/local/bin/codex`; an older standalone Codex
+installation must not shadow that path.

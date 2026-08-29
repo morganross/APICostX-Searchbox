@@ -1,5 +1,5 @@
 CODEX_RUNNER_TOKEN=replace-with-a-long-random-bearer-token
-CODEX_RUNNER_CODEX_BIN=/home/ubuntu/.local/bin/codex
+CODEX_RUNNER_CODEX_BIN=/usr/local/bin/codex
 CODEX_RUNNER_AUTH_JSON=/home/ubuntu/.codex/auth.json
 CODEX_RUNNER_DEFAULT_WORKSPACE=/home/ubuntu
 CODEX_RUNNER_ALLOWED_WORKSPACES=/home/ubuntu
