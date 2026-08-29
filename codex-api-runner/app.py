@@ -26,7 +26,17 @@ TOKEN = os.getenv("CODEX_RUNNER_TOKEN", "")
 MAX_PROMPT_CHARS = int(os.getenv("CODEX_RUNNER_MAX_PROMPT_CHARS", "200000"))
 MAX_CONCURRENT = int(os.getenv("CODEX_RUNNER_MAX_CONCURRENT", "1"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("CODEX_RUNNER_REQUEST_TIMEOUT_SECONDS", "3600"))
-ALLOWED_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex-spark']
+ALLOWED_MODELS = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+]
+APICOSTX_REASONING_EFFORTS = {"low", "medium", "high"}
+CODEX_REASONING_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "xhigh"}
 ALLOWED_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
 DANGER_ALLOWED = os.getenv("ALLOW_DANGER_FULL_ACCESS", "false").lower() == "true"
 
@@ -79,6 +89,16 @@ def workspace_ok(path: str) -> str:
         if resolved == ar or resolved.startswith(ar.rstrip("/") + "/"):
             return resolved
     raise HTTPException(status_code=400, detail="Workspace is not allowlisted")
+
+
+def resolve_reasoning_effort(value: str | None) -> str:
+    if value is None or not str(value).strip():
+        return CODEX_REASONING_EFFORT_MAP["medium"]
+    normalized = str(value).strip().lower()
+    if normalized not in APICOSTX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(APICOSTX_REASONING_EFFORTS))
+        raise ValueError(f"Unsupported reasoning_effort '{value}'. Supported values: {allowed}")
+    return CODEX_REASONING_EFFORT_MAP[normalized]
 
 
 def messages_to_prompt(messages: list[dict[str, Any]]) -> str:
@@ -136,6 +156,27 @@ def update_job(job_id: str, **fields: Any) -> None:
         )
 
 
+def build_codex_args(
+    *,
+    model: str,
+    workspace: str,
+    sandbox: str,
+    ephemeral: bool,
+    reasoning_effort: str | None,
+    final_path: Path,
+    output_schema: str | None = None,
+) -> list[str]:
+    args = [CODEX_BIN, "exec", "--json", "--sandbox", sandbox, "--skip-git-repo-check", "--cd", workspace, "-m", model, "-o", str(final_path)]
+    if ephemeral:
+        args.append("--ephemeral")
+    resolved_effort = resolve_reasoning_effort(reasoning_effort)
+    args += ["-c", f'model_reasoning_effort="{resolved_effort}"']
+    if output_schema:
+        args += ["--output-schema", output_schema]
+    args.append("-")
+    return args
+
+
 def run_codex(job_id: str, *, model: str, prompt: str, workspace: str, sandbox: str, ephemeral: bool, reasoning_effort: str | None, output_schema: str | None = None) -> None:
     jd = job_dir(job_id)
     jd.mkdir(parents=True, exist_ok=True)
@@ -144,16 +185,15 @@ def run_codex(job_id: str, *, model: str, prompt: str, workspace: str, sandbox: 
     stdout_path = jd / "stdout.jsonl"
     stderr_path = jd / "stderr.log"
     final_path = jd / "final.txt"
-    args = [CODEX_BIN, "exec", "--json", "--sandbox", sandbox, "--skip-git-repo-check", "--cd", workspace, "-m", model, "-o", str(final_path)]
-    if ephemeral:
-        args.append("--ephemeral")
-    if reasoning_effort:
-        safe_effort = str(reasoning_effort).lower()
-        if safe_effort in {"minimal", "low", "medium", "high"}:
-            args += ["-c", f'model_reasoning_effort="{safe_effort}"']
-    if output_schema:
-        args += ["--output-schema", output_schema]
-    args.append("-")
+    args = build_codex_args(
+        model=model,
+        workspace=workspace,
+        sandbox=sandbox,
+        ephemeral=ephemeral,
+        reasoning_effort=reasoning_effort,
+        final_path=final_path,
+        output_schema=output_schema,
+    )
     with _sem:
         update_job(job_id, status="running", started_at=now())
         try:
@@ -207,6 +247,8 @@ def health() -> dict[str, Any]:
         "auth_json_exists": Path(AUTH_JSON).exists(),
         "token_configured": bool(TOKEN),
         "models": ALLOWED_MODELS,
+        "reasoning_efforts": sorted(APICOSTX_REASONING_EFFORTS),
+        "reasoning_effort_mapping": CODEX_REASONING_EFFORT_MAP,
         "max_concurrent": MAX_CONCURRENT,
     }
 
@@ -214,7 +256,19 @@ def health() -> dict[str, Any]:
 @APP.get("/v1/models")
 def models(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     auth(authorization)
-    return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "codexexecapi"} for m in ALLOWED_MODELS]}
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": model,
+                "object": "model",
+                "owned_by": "codexexecapi",
+                "supported_reasoning_efforts": sorted(APICOSTX_REASONING_EFFORTS),
+                "reasoning_effort_mapping": CODEX_REASONING_EFFORT_MAP,
+            }
+            for model in ALLOWED_MODELS
+        ],
+    }
 
 
 @APP.post("/v1/chat/completions")
@@ -232,6 +286,10 @@ def chat(req: ChatRequest, authorization: str | None = Header(default=None)) -> 
         raise HTTPException(status_code=400, detail="Unsupported sandbox")
     if sandbox == "danger-full-access" and not DANGER_ALLOWED:
         raise HTTPException(status_code=400, detail="danger-full-access is disabled")
+    try:
+        resolve_reasoning_effort(req.reasoning_effort)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     workspace = workspace_ok(req.workspace or DEFAULT_WORKSPACE)
     prompt = (req.prompt or messages_to_prompt(req.messages)).strip()
     if not prompt:

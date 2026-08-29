@@ -65,7 +65,10 @@ curl --fail \
   http://10.0.1.209:8765/v1/models
 ```
 
-The API intentionally supports non-streaming requests only. Allowed models,
+The API intentionally supports non-streaming requests only. APICostX sends
+`reasoning_effort` as `low`, `medium`, or `high`. CodexExecAPI maps `high` to
+Codex `xhigh` internally; the other two values are unchanged. Invalid values
+fail with HTTP `400` instead of silently falling back. Allowed models,
 sandboxes, concurrency, prompt size, and timeout behavior are defined in
 `app.py` and the environment file.
 
